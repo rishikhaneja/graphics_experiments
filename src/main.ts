@@ -28,10 +28,10 @@
 //   4. Composite — combines HDR scene + blurred bloom, then applies
 //      ACES filmic tone mapping and gamma correction.
 //
-// The WebGPU backend stays forward-rendered (no post-processing yet).
+// Both WebGL2 and WebGPU backends implement the full pipeline.
 
 import { mat4, vec3 } from "gl-matrix";
-import type { Renderer, MeshHandle, TextureHandle, DrawCall } from "./engine";
+import type { Renderer, MeshHandle, TextureHandle, DrawCall, RenderOptions } from "./engine";
 import { WebGPURenderer } from "./engine";
 import { WebGL2Renderer } from "./engine";
 import { parseObj } from "./objParser";
@@ -43,17 +43,34 @@ import { computeTangents } from "./tangents";
 
 const canvas = document.getElementById("canvas") as HTMLCanvasElement;
 
+// Backend selection via ?backend= query param, default auto-detect
+const params = new URLSearchParams(window.location.search);
+const backendParam = params.get("backend"); // "webgpu" | "webgl2" | null
+
+// Sync the dropdown to the current selection and reload on change
+const toggle = document.getElementById("backend-toggle") as HTMLSelectElement;
+toggle.addEventListener("change", () => {
+  params.set("backend", toggle.value);
+  window.location.search = params.toString();
+});
+
+const shadowsToggle = document.getElementById("toggle-shadows") as HTMLInputElement;
+const normalsToggle = document.getElementById("toggle-normals") as HTMLInputElement;
+const postprocToggle = document.getElementById("toggle-postproc") as HTMLInputElement;
+
 async function createRenderer(): Promise<Renderer & { aspect: number }> {
-  if (navigator.gpu) {
+  if (backendParam !== "webgl2" && navigator.gpu) {
     try {
       const r = await WebGPURenderer.create(canvas);
       console.log("Using WebGPU backend");
+      toggle.value = "webgpu";
       return r;
     } catch (e) {
       console.warn("WebGPU init failed, falling back to WebGL2:", e);
     }
   }
   console.log("Using WebGL2 backend");
+  toggle.value = "webgl2";
   return new WebGL2Renderer(canvas);
 }
 
@@ -266,12 +283,18 @@ async function main() {
       { mesh: groundMesh, texture, normalMap, model: groundModel },
     ];
 
+    const options: RenderOptions = {
+      shadows: shadowsToggle.checked,
+      normalMaps: normalsToggle.checked,
+      postProcessing: postprocToggle.checked,
+    };
+
     renderer.renderFrame(drawCalls, {
       viewProj,
       lightPos,
       cameraPos: eye,
       lightViewProj,
-    });
+    }, options);
 
     requestAnimationFrame(frame);
   }

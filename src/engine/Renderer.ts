@@ -27,13 +27,19 @@ export interface FrameUniforms {
   lightViewProj?: mat4;
 }
 
+export interface RenderOptions {
+  shadows: boolean;
+  normalMaps: boolean;
+  postProcessing: boolean;
+}
+
 export interface Renderer {
   createMesh(data: Float32Array, layout: VertexLayout[]): MeshHandle;
   createTexture(desc: TextureDesc): TextureHandle;
   resize(): void;
 
   /** Render a full frame: shadow pass (if lightViewProj) + main pass for all objects. */
-  renderFrame(drawCalls: DrawCall[], uniforms: FrameUniforms): void;
+  renderFrame(drawCalls: DrawCall[], uniforms: FrameUniforms, options: RenderOptions): void;
 }
 
 export interface MeshHandle {

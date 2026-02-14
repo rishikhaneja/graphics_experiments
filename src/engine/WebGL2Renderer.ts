@@ -22,7 +22,7 @@
 // compresses the HDR range gracefully — bright areas saturate smoothly
 // instead of clipping to white.
 
-import type { Renderer, VertexLayout, TextureDesc, MeshHandle, TextureHandle, DrawCall, FrameUniforms } from "./Renderer";
+import type { Renderer, VertexLayout, TextureDesc, MeshHandle, TextureHandle, DrawCall, FrameUniforms, RenderOptions } from "./Renderer";
 
 interface GL2MeshHandle extends MeshHandle {
   vao: WebGLVertexArrayObject;
@@ -271,6 +271,7 @@ uniform sampler2D uScene;
 uniform sampler2D uBloom;
 uniform float uBloomStrength;
 uniform float uExposure;
+uniform bool uToneMap;
 
 out vec4 fragColor;
 
@@ -289,12 +290,14 @@ void main() {
   vec3 bloom = texture(uBloom, vUV).rgb;
 
   vec3 hdr = scene + bloom * uBloomStrength;
-  vec3 mapped = aces(hdr * uExposure);
 
-  // Gamma correction (linear → sRGB)
-  mapped = pow(mapped, vec3(1.0 / 2.2));
-
-  fragColor = vec4(mapped, 1.0);
+  if (uToneMap) {
+    vec3 mapped = aces(hdr * uExposure);
+    mapped = pow(mapped, vec3(1.0 / 2.2));
+    fragColor = vec4(mapped, 1.0);
+  } else {
+    fragColor = vec4(hdr, 1.0);
+  }
 }
 `;
 
@@ -352,6 +355,7 @@ export class WebGL2Renderer implements Renderer {
   private compositeUBloom: WebGLUniformLocation | null;
   private compositeUBloomStrength: WebGLUniformLocation | null;
   private compositeUExposure: WebGLUniformLocation | null;
+  private compositeUToneMap: WebGLUniformLocation | null;
 
   private fullscreenVAO: WebGLVertexArrayObject;
 
@@ -420,6 +424,7 @@ export class WebGL2Renderer implements Renderer {
     this.compositeUBloom = gl.getUniformLocation(this.compositeProgram, "uBloom");
     this.compositeUBloomStrength = gl.getUniformLocation(this.compositeProgram, "uBloomStrength");
     this.compositeUExposure = gl.getUniformLocation(this.compositeProgram, "uExposure");
+    this.compositeUToneMap = gl.getUniformLocation(this.compositeProgram, "uToneMap");
 
     // ---- Shadow pass ----
     this.shadowProgram = this.buildProgram(SHADOW_VERT, SHADOW_FRAG);
@@ -557,17 +562,17 @@ export class WebGL2Renderer implements Renderer {
     }
   }
 
-  renderFrame(drawCalls: DrawCall[], u: FrameUniforms): void {
+  renderFrame(drawCalls: DrawCall[], u: FrameUniforms, opts: RenderOptions): void {
     const gl = this.gl;
     const w = this.gBufWidth;
     const h = this.gBufHeight;
 
     // ---- Pass 1: Shadow ----
-    if (u.lightViewProj) {
-      gl.bindFramebuffer(gl.FRAMEBUFFER, this.shadowFBO);
-      gl.viewport(0, 0, SHADOW_SIZE, SHADOW_SIZE);
-      gl.clear(gl.DEPTH_BUFFER_BIT);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.shadowFBO);
+    gl.viewport(0, 0, SHADOW_SIZE, SHADOW_SIZE);
+    gl.clear(gl.DEPTH_BUFFER_BIT); // clears to 1.0 — "no shadow" everywhere
 
+    if (opts.shadows && u.lightViewProj) {
       gl.useProgram(this.shadowProgram);
       gl.uniformMatrix4fv(this.uShadowLightVP, false, u.lightViewProj);
 
@@ -603,7 +608,7 @@ export class WebGL2Renderer implements Renderer {
       gl.uniform1i(this.gBufUTexture, 0);
 
       gl.activeTexture(gl.TEXTURE1);
-      const hasNormal = !!dc.normalMap;
+      const hasNormal = opts.normalMaps && !!dc.normalMap;
       gl.bindTexture(gl.TEXTURE_2D, hasNormal ? (dc.normalMap as GL2TextureHandle).texture : this.flatNormalTex);
       gl.uniform1i(this.gBufUNormalMap, 1);
       gl.uniform1i(this.gBufUHasNormalMap, hasNormal ? 1 : 0);
@@ -647,45 +652,47 @@ export class WebGL2Renderer implements Renderer {
 
     gl.drawArrays(gl.TRIANGLES, 0, 3);
 
-    // ---- Pass 4: Bloom extraction → bloom FBO 0 ----
-    const bw = Math.max(1, w >> 1);
-    const bh = Math.max(1, h >> 1);
+    // ---- Passes 4–5: Bloom (only when post-processing is on) ----
+    if (opts.postProcessing) {
+      const bw = Math.max(1, w >> 1);
+      const bh = Math.max(1, h >> 1);
 
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.bloomFBOs[0]);
-    gl.viewport(0, 0, bw, bh);
-    gl.clear(gl.COLOR_BUFFER_BIT);
-
-    gl.useProgram(this.bloomExtractProgram);
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, this.hdrTex);
-    gl.uniform1i(this.bloomExtractUScene, 0);
-    gl.uniform1f(this.bloomExtractUThreshold, 1.0);
-
-    gl.drawArrays(gl.TRIANGLES, 0, 3);
-
-    // ---- Pass 5: Gaussian blur ping-pong ----
-    gl.useProgram(this.blurProgram);
-    gl.uniform1i(this.blurUImage, 0);
-
-    for (let i = 0; i < BLOOM_PASSES; i++) {
-      // Horizontal blur: read FBO 0 → write FBO 1
-      gl.bindFramebuffer(gl.FRAMEBUFFER, this.bloomFBOs[1]);
-      gl.viewport(0, 0, bw, bh);
-      gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, this.bloomTextures[0]);
-      gl.uniform2f(this.blurUDirection, 1.0 / bw, 0.0);
-      gl.drawArrays(gl.TRIANGLES, 0, 3);
-
-      // Vertical blur: read FBO 1 → write FBO 0
+      // Pass 4: Bloom extraction → bloom FBO 0
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.bloomFBOs[0]);
       gl.viewport(0, 0, bw, bh);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+
+      gl.useProgram(this.bloomExtractProgram);
       gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, this.bloomTextures[1]);
-      gl.uniform2f(this.blurUDirection, 0.0, 1.0 / bh);
+      gl.bindTexture(gl.TEXTURE_2D, this.hdrTex);
+      gl.uniform1i(this.bloomExtractUScene, 0);
+      gl.uniform1f(this.bloomExtractUThreshold, 1.0);
+
       gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+      // Pass 5: Gaussian blur ping-pong
+      gl.useProgram(this.blurProgram);
+      gl.uniform1i(this.blurUImage, 0);
+
+      for (let i = 0; i < BLOOM_PASSES; i++) {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, this.bloomFBOs[1]);
+        gl.viewport(0, 0, bw, bh);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, this.bloomTextures[0]);
+        gl.uniform2f(this.blurUDirection, 1.0 / bw, 0.0);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+        gl.bindFramebuffer(gl.FRAMEBUFFER, this.bloomFBOs[0]);
+        gl.viewport(0, 0, bw, bh);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, this.bloomTextures[1]);
+        gl.uniform2f(this.blurUDirection, 0.0, 1.0 / bh);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+      }
     }
 
     // ---- Pass 6: Composite + tone mapping → screen ----
+    // Always runs — converts HDR to screen. bloomStrength=0 when post-processing is off.
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
 
@@ -699,8 +706,9 @@ export class WebGL2Renderer implements Renderer {
     gl.bindTexture(gl.TEXTURE_2D, this.bloomTextures[0]);
     gl.uniform1i(this.compositeUBloom, 1);
 
-    gl.uniform1f(this.compositeUBloomStrength, 0.3);
+    gl.uniform1f(this.compositeUBloomStrength, opts.postProcessing ? 0.3 : 0.0);
     gl.uniform1f(this.compositeUExposure, 1.0);
+    gl.uniform1i(this.compositeUToneMap, opts.postProcessing ? 1 : 0);
 
     gl.drawArrays(gl.TRIANGLES, 0, 3);
 
