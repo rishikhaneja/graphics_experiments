@@ -8,33 +8,37 @@
 //   [x] Step 6 — Abstraction Layer
 //   [x] Step 7 — WebGPU Backend
 //   [x] Step 8 — OBJ Mesh Loading
-//   [ ] Step 9 — Normal Mapping
+//   [x] Step 9 — Normal Mapping
 //   [ ] Step 10 — Shadow Mapping
 //   [ ] Step 11 — Multiple Objects / Scene Graph
 //   [ ] Step 12 — Deferred Rendering
 //   [ ] Step 13 — Post-Processing (bloom, tone mapping)
 //   [ ] Step 14 — Skeletal Animation
 
-// Step 8: OBJ Mesh Loading
+// Step 9: Normal Mapping
 //
-// Until now we hardcoded cube geometry inline. Real 3D apps load meshes from
-// files — the most common simple format is Wavefront .obj. We wrote a parser
-// in src/objParser.ts that handles:
-//   - v (positions), vt (texcoords), vn (normals)
-//   - f (faces) with v/vt/vn indexing and fan triangulation for polygons
+// Phong lighting with geometric normals makes curved surfaces look faceted.
+// Normal mapping adds per-pixel detail by storing perturbed normals in a
+// texture, letting a low-poly mesh look high-detail.
 //
-// The parser outputs an interleaved Float32Array that matches our existing
-// vertex layout (pos.xyz, uv.uv, normal.xyz) — so both WebGL2 and WebGPU
-// renderers work without changes.
+// How it works:
+//   1. We compute per-vertex **tangent** vectors from the mesh's UV mapping
+//      (src/tangents.ts). Together with the vertex normal and the cross-product
+//      bitangent, this forms a **TBN matrix** at each vertex.
+//   2. The normal map stores tangent-space normals as RGB colors:
+//      (0,0,1) → flat surface, deviations add bumps/grooves.
+//   3. The fragment shader samples the normal map, remaps [0,1]→[-1,1],
+//      and transforms the result to world space via the interpolated TBN.
 //
-// We also wrote a script (scripts/generateTorus.ts) that procedurally creates
-// a torus .obj file, giving us a more interesting model to light and rotate.
+// We generate a procedural "brick" normal map to make the checkerboard
+// texture look like raised tiles with beveled edges.
 
 import { mat4, vec3 } from "gl-matrix";
 import type { Renderer, MeshHandle, TextureHandle } from "./engine";
 import { WebGPURenderer } from "./engine";
 import { WebGL2Renderer } from "./engine";
 import { parseObj } from "./objParser";
+import { computeTangents } from "./tangents";
 
 // ---------------------------------------------------------------------------
 // Initialize renderer — try WebGPU first, fall back to WebGL2
@@ -70,26 +74,67 @@ async function loadObj(url: string): Promise<Float32Array> {
 }
 
 // ---------------------------------------------------------------------------
-// Vertex layout — shared between OBJ data and both backends
+// Vertex layout — now includes tangent (location 3)
 // ---------------------------------------------------------------------------
 
 const VERTEX_LAYOUT = [
   { location: 0, size: 3 }, // position
   { location: 1, size: 2 }, // texcoord
   { location: 2, size: 3 }, // normal
+  { location: 3, size: 3 }, // tangent
 ];
 
-// Checkerboard texture pixels.
-const TEX_SIZE = 8;
+// ---------------------------------------------------------------------------
+// Procedural textures
+// ---------------------------------------------------------------------------
+
+// Checkerboard albedo
+const TEX_SIZE = 64;
 const TEX_PIXELS = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
 for (let row = 0; row < TEX_SIZE; row++) {
   for (let col = 0; col < TEX_SIZE; col++) {
     const i = (row * TEX_SIZE + col) * 4;
-    const v = (row + col) % 2 === 0 ? 255 : 60;
+    const tileSize = 8;
+    const v = (Math.floor(row / tileSize) + Math.floor(col / tileSize)) % 2 === 0 ? 220 : 80;
     TEX_PIXELS[i] = v;
     TEX_PIXELS[i + 1] = v;
     TEX_PIXELS[i + 2] = v;
     TEX_PIXELS[i + 3] = 255;
+  }
+}
+
+// Normal map — raised tiles with beveled edges.
+// Each tile is tileSize×tileSize pixels. The bevel creates edges that catch light.
+// Tangent-space normal: (0,0,1) = flat, X/Y deviations = tilt.
+const NORMAL_MAP = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
+{
+  const tileSize = 8;
+  const bevel = 2; // pixels of bevel on each side
+  for (let row = 0; row < TEX_SIZE; row++) {
+    for (let col = 0; col < TEX_SIZE; col++) {
+      const i = (row * TEX_SIZE + col) * 4;
+      const tx = col % tileSize; // position within tile
+      const ty = row % tileSize;
+
+      // Default: flat normal (tangent-space up)
+      let nx = 0, ny = 0, nz = 1;
+
+      // Bevel edges: tilt normal outward
+      if (tx < bevel) nx = -0.7;
+      else if (tx >= tileSize - bevel) nx = 0.7;
+      if (ty < bevel) ny = 0.7;  // flip Y because texture Y is top-down
+      else if (ty >= tileSize - bevel) ny = -0.7;
+
+      // Normalize
+      const len = Math.sqrt(nx * nx + ny * ny + nz * nz);
+      nx /= len; ny /= len; nz /= len;
+
+      // Map [-1,1] → [0,255]
+      NORMAL_MAP[i]     = Math.round((nx * 0.5 + 0.5) * 255);
+      NORMAL_MAP[i + 1] = Math.round((ny * 0.5 + 0.5) * 255);
+      NORMAL_MAP[i + 2] = Math.round((nz * 0.5 + 0.5) * 255);
+      NORMAL_MAP[i + 3] = 255;
+    }
   }
 }
 
@@ -148,20 +193,29 @@ canvas.addEventListener("wheel", (e) => {
 }, { passive: false });
 
 // ---------------------------------------------------------------------------
-// Main — async because WebGPU init and OBJ loading are async
+// Main
 // ---------------------------------------------------------------------------
 
 async function main() {
-  const [renderer, meshData] = await Promise.all([
+  const [renderer, rawMeshData] = await Promise.all([
     createRenderer(),
     loadObj("models/torus.obj"),
   ]);
 
+  // Compute tangents and create mesh with the extended vertex layout
+  const meshData = computeTangents(rawMeshData);
   const mesh: MeshHandle = renderer.createMesh(meshData, VERTEX_LAYOUT);
+
   const texture: TextureHandle = renderer.createTexture({
     width: TEX_SIZE,
     height: TEX_SIZE,
     data: TEX_PIXELS,
+  });
+
+  const normalMap: TextureHandle = renderer.createTexture({
+    width: TEX_SIZE,
+    height: TEX_SIZE,
+    data: NORMAL_MAP,
   });
 
   const model = mat4.create();
@@ -189,7 +243,13 @@ async function main() {
     const lightAngle = time * 0.0005;
     vec3.set(lightPos, 3.0 * Math.cos(lightAngle), 2.0, 3.0 * Math.sin(lightAngle));
 
-    renderer.draw(mesh, texture, { model, viewProj, lightPos, cameraPos: eye });
+    renderer.draw(mesh, texture, {
+      model,
+      viewProj,
+      lightPos,
+      cameraPos: eye,
+      normalMap,
+    });
 
     requestAnimationFrame(frame);
   }

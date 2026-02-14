@@ -1,10 +1,14 @@
 // WebGL2Renderer — implements the Renderer interface using WebGL2.
-// This is a thin wrapper around the raw WebGL calls from earlier steps,
-// now organized behind the shared interface so we can swap backends.
+//
+// Step 9 adds normal mapping:
+//   - Vertex shader now accepts a tangent attribute (location 3) and passes
+//     the TBN matrix to the fragment shader.
+//   - Fragment shader samples a normal map (texture unit 1) and transforms
+//     the sample from tangent space to world space using the TBN matrix.
+//   - When no normal map is bound, the shader falls back to the geometric normal.
 
 import type { Renderer, VertexLayout, TextureDesc, MeshHandle, TextureHandle, DrawUniforms } from "./Renderer";
 
-// Concrete handle types (opaque to the caller through the interface).
 interface GL2MeshHandle extends MeshHandle {
   vao: WebGLVertexArrayObject;
 }
@@ -18,18 +22,27 @@ const VERT_SRC = `#version 300 es
 layout(location = 0) in vec3 aPosition;
 layout(location = 1) in vec2 aTexCoord;
 layout(location = 2) in vec3 aNormal;
+layout(location = 3) in vec3 aTangent;
 
 uniform mat4 uModel;
 uniform mat4 uViewProj;
 
 out vec2 vTexCoord;
 out vec3 vWorldPos;
-out vec3 vNormal;
+out mat3 vTBN;
 
 void main() {
   vec4 worldPos = uModel * vec4(aPosition, 1.0);
   vWorldPos = worldPos.xyz;
-  vNormal = normalize(mat3(uModel) * aNormal);
+
+  mat3 modelMat3 = mat3(uModel);
+  vec3 N = normalize(modelMat3 * aNormal);
+  vec3 T = normalize(modelMat3 * aTangent);
+  // Re-orthogonalize T w.r.t. N (Gram-Schmidt)
+  T = normalize(T - dot(T, N) * N);
+  vec3 B = cross(N, T);
+  vTBN = mat3(T, B, N);
+
   vTexCoord = aTexCoord;
   gl_Position = uViewProj * worldPos;
 }
@@ -40,18 +53,28 @@ precision mediump float;
 
 in vec2 vTexCoord;
 in vec3 vWorldPos;
-in vec3 vNormal;
+in mat3 vTBN;
 
 uniform sampler2D uTexture;
+uniform sampler2D uNormalMap;
 uniform vec3 uLightPos;
 uniform vec3 uCameraPos;
+uniform bool uHasNormalMap;
 
 out vec4 fragColor;
 
 void main() {
   vec3 texColor = texture(uTexture, vTexCoord).rgb;
 
-  vec3 N = normalize(vNormal);
+  vec3 N;
+  if (uHasNormalMap) {
+    // Sample normal map (stored as RGB [0,1], remap to [-1,1])
+    vec3 mapNormal = texture(uNormalMap, vTexCoord).rgb * 2.0 - 1.0;
+    N = normalize(vTBN * mapNormal);
+  } else {
+    N = normalize(vTBN[2]); // Just the geometric normal (column 2)
+  }
+
   vec3 L = normalize(uLightPos - vWorldPos);
   vec3 V = normalize(uCameraPos - vWorldPos);
   vec3 R = reflect(-L, N);
@@ -70,12 +93,16 @@ export class WebGL2Renderer implements Renderer {
   private program: WebGLProgram;
   private canvas: HTMLCanvasElement;
 
-  // Uniform locations (cached on init).
   private uModel: WebGLUniformLocation | null;
   private uViewProj: WebGLUniformLocation | null;
   private uTexture: WebGLUniformLocation | null;
+  private uNormalMap: WebGLUniformLocation | null;
   private uLightPos: WebGLUniformLocation | null;
   private uCameraPos: WebGLUniformLocation | null;
+  private uHasNormalMap: WebGLUniformLocation | null;
+
+  // 1x1 flat normal texture — used when no normal map is provided.
+  private flatNormalTex: WebGLTexture;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -87,10 +114,18 @@ export class WebGL2Renderer implements Renderer {
     this.uModel = gl.getUniformLocation(this.program, "uModel");
     this.uViewProj = gl.getUniformLocation(this.program, "uViewProj");
     this.uTexture = gl.getUniformLocation(this.program, "uTexture");
+    this.uNormalMap = gl.getUniformLocation(this.program, "uNormalMap");
     this.uLightPos = gl.getUniformLocation(this.program, "uLightPos");
     this.uCameraPos = gl.getUniformLocation(this.program, "uCameraPos");
+    this.uHasNormalMap = gl.getUniformLocation(this.program, "uHasNormalMap");
 
     gl.enable(gl.DEPTH_TEST);
+
+    // Create a 1x1 flat normal texture (pointing straight up in tangent space: 0,0,1 → 128,128,255)
+    this.flatNormalTex = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D, this.flatNormalTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE,
+      new Uint8Array([128, 128, 255, 255]));
   }
 
   createMesh(data: Float32Array, layout: VertexLayout[]): GL2MeshHandle {
@@ -152,9 +187,21 @@ export class WebGL2Renderer implements Renderer {
     gl.uniform3fv(this.uLightPos, u.lightPos as unknown as Float32Array);
     gl.uniform3fv(this.uCameraPos, u.cameraPos as unknown as Float32Array);
 
+    // Albedo texture on unit 0
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, texture.texture);
     gl.uniform1i(this.uTexture, 0);
+
+    // Normal map on unit 1 (or flat fallback)
+    gl.activeTexture(gl.TEXTURE1);
+    const hasNormal = !!u.normalMap;
+    if (hasNormal) {
+      gl.bindTexture(gl.TEXTURE_2D, (u.normalMap as GL2TextureHandle).texture);
+    } else {
+      gl.bindTexture(gl.TEXTURE_2D, this.flatNormalTex);
+    }
+    gl.uniform1i(this.uNormalMap, 1);
+    gl.uniform1i(this.uHasNormalMap, hasNormal ? 1 : 0);
 
     gl.bindVertexArray(mesh.vao);
     gl.drawArrays(gl.TRIANGLES, 0, mesh.vertexCount);
