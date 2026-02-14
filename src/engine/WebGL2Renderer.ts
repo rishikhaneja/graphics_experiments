@@ -1,9 +1,24 @@
 // WebGL2Renderer — implements the Renderer interface using WebGL2.
 //
-// Step 11 restructures rendering to support multiple objects per frame.
-// renderFrame() does:
-//   1. Shadow pass — render ALL objects into the shadow map
-//   2. Main pass — render ALL objects with lighting + shadow sampling
+// Step 12: Deferred rendering.
+//
+// The forward renderer computed lighting per-fragment for every object. That
+// works fine for a single light, but scales as O(objects × lights). Deferred
+// rendering decouples geometry from lighting:
+//
+//   1. Shadow pass  — render depth from the light's point of view (unchanged).
+//   2. G-Buffer pass — render ALL geometry into three textures (MRT):
+//        attachment 0: world-space position  (RGBA16F)
+//        attachment 1: world-space normal    (RGBA16F)
+//        attachment 2: albedo color          (RGBA8)
+//      No lighting math happens here — just material + geometry data.
+//   3. Lighting pass — a fullscreen quad samples the G-Buffer textures and
+//      the shadow map, then computes Phong lighting in screen space. This
+//      runs once regardless of how many objects are in the scene.
+//
+// The key insight: lighting cost is now O(pixels × lights) instead of
+// O(fragments × lights). Overlapping geometry doesn't re-shade — only the
+// front-most fragment (written to the G-Buffer via depth test) gets lit.
 
 import type { Renderer, VertexLayout, TextureDesc, MeshHandle, TextureHandle, DrawCall, FrameUniforms } from "./Renderer";
 
@@ -15,7 +30,10 @@ interface GL2TextureHandle extends TextureHandle {
   texture: WebGLTexture;
 }
 
-// ---- Shadow pass shader (depth only) ----
+// ---------------------------------------------------------------------------
+// Shadow pass shader (depth only) — unchanged from forward renderer
+// ---------------------------------------------------------------------------
+
 const SHADOW_VERT = `#version 300 es
 layout(location = 0) in vec3 aPosition;
 layout(location = 1) in vec2 aTexCoord;
@@ -38,8 +56,11 @@ void main() {
 }
 `;
 
-// ---- Main pass shader ----
-const VERT_SRC = `#version 300 es
+// ---------------------------------------------------------------------------
+// G-Buffer geometry pass — writes position, normal, albedo to MRT
+// ---------------------------------------------------------------------------
+
+const GBUF_VERT = `#version 300 es
 
 layout(location = 0) in vec3 aPosition;
 layout(location = 1) in vec2 aTexCoord;
@@ -48,12 +69,10 @@ layout(location = 3) in vec3 aTangent;
 
 uniform mat4 uModel;
 uniform mat4 uViewProj;
-uniform mat4 uLightViewProj;
 
 out vec2 vTexCoord;
 out vec3 vWorldPos;
 out mat3 vTBN;
-out vec4 vLightSpacePos;
 
 void main() {
   vec4 worldPos = uModel * vec4(aPosition, 1.0);
@@ -67,29 +86,83 @@ void main() {
   vTBN = mat3(T, B, N);
 
   vTexCoord = aTexCoord;
-  vLightSpacePos = uLightViewProj * worldPos;
   gl_Position = uViewProj * worldPos;
 }
 `;
 
-const FRAG_SRC = `#version 300 es
-precision mediump float;
+// Fragment shader outputs to 3 render targets via layout qualifiers.
+// No lighting math — just store geometry data for the lighting pass.
+const GBUF_FRAG = `#version 300 es
+precision highp float;
 
 in vec2 vTexCoord;
 in vec3 vWorldPos;
 in mat3 vTBN;
-in vec4 vLightSpacePos;
 
 uniform sampler2D uTexture;
 uniform sampler2D uNormalMap;
+uniform bool uHasNormalMap;
+
+layout(location = 0) out vec4 gPosition;
+layout(location = 1) out vec4 gNormal;
+layout(location = 2) out vec4 gAlbedo;
+
+void main() {
+  gPosition = vec4(vWorldPos, 1.0);
+
+  vec3 N;
+  if (uHasNormalMap) {
+    vec3 mapNormal = texture(uNormalMap, vTexCoord).rgb * 2.0 - 1.0;
+    N = normalize(vTBN * mapNormal);
+  } else {
+    N = normalize(vTBN[2]);
+  }
+  gNormal = vec4(N, 1.0);
+
+  gAlbedo = texture(uTexture, vTexCoord);
+}
+`;
+
+// ---------------------------------------------------------------------------
+// Lighting pass — fullscreen quad, reads G-Buffer + shadow map
+// ---------------------------------------------------------------------------
+
+const LIGHT_VERT = `#version 300 es
+
+// Fullscreen triangle trick: 3 vertices, no VBO needed.
+// gl_VertexID 0 → (-1,-1), 1 → (3,-1), 2 → (-1,3)
+// This covers the entire screen with a single triangle.
+out vec2 vUV;
+
+void main() {
+  float x = float((gl_VertexID & 1) << 2) - 1.0;
+  float y = float((gl_VertexID & 2) << 1) - 1.0;
+  vUV = vec2(x, y) * 0.5 + 0.5;
+  gl_Position = vec4(x, y, 0.0, 1.0);
+}
+`;
+
+const LIGHT_FRAG = `#version 300 es
+precision highp float;
+
+in vec2 vUV;
+
+uniform sampler2D uGPosition;
+uniform sampler2D uGNormal;
+uniform sampler2D uGAlbedo;
 uniform sampler2D uShadowMap;
+
 uniform vec3 uLightPos;
 uniform vec3 uCameraPos;
-uniform bool uHasNormalMap;
+uniform mat4 uLightViewProj;
 
 out vec4 fragColor;
 
-float shadowCalc(vec3 projCoords) {
+float shadowCalc(vec3 worldPos) {
+  vec4 lightSpacePos = uLightViewProj * vec4(worldPos, 1.0);
+  vec3 projCoords = lightSpacePos.xyz / lightSpacePos.w;
+  projCoords = projCoords * 0.5 + 0.5;
+
   if (projCoords.x < 0.0 || projCoords.x > 1.0 ||
       projCoords.y < 0.0 || projCoords.y > 1.0 ||
       projCoords.z > 1.0) return 1.0;
@@ -108,31 +181,30 @@ float shadowCalc(vec3 projCoords) {
 }
 
 void main() {
-  vec3 texColor = texture(uTexture, vTexCoord).rgb;
+  vec3 worldPos = texture(uGPosition, vUV).rgb;
+  vec3 N = normalize(texture(uGNormal, vUV).rgb);
+  vec3 albedo = texture(uGAlbedo, vUV).rgb;
 
-  vec3 N;
-  if (uHasNormalMap) {
-    vec3 mapNormal = texture(uNormalMap, vTexCoord).rgb * 2.0 - 1.0;
-    N = normalize(vTBN * mapNormal);
-  } else {
-    N = normalize(vTBN[2]);
+  // Discard background pixels (position = 0,0,0 with alpha 0)
+  if (texture(uGPosition, vUV).a == 0.0) {
+    fragColor = vec4(0.08, 0.08, 0.12, 1.0);
+    return;
   }
 
-  vec3 L = normalize(uLightPos - vWorldPos);
-  vec3 V = normalize(uCameraPos - vWorldPos);
+  vec3 L = normalize(uLightPos - worldPos);
+  vec3 V = normalize(uCameraPos - worldPos);
   vec3 R = reflect(-L, N);
 
   float ambient = 0.15;
   float diffuse = max(dot(N, L), 0.0);
   float specular = pow(max(dot(R, V), 0.0), 32.0);
 
-  vec3 projCoords = vLightSpacePos.xyz / vLightSpacePos.w;
-  projCoords = projCoords * 0.5 + 0.5;
-  float shadow = shadowCalc(projCoords);
+  float shadow = shadowCalc(worldPos);
 
-  vec3 color = texColor * ambient
-             + texColor * diffuse * shadow
+  vec3 color = albedo * ambient
+             + albedo * diffuse * shadow
              + vec3(1.0) * specular * 0.5 * shadow;
+
   fragColor = vec4(color, 1.0);
 }
 `;
@@ -143,17 +215,33 @@ export class WebGL2Renderer implements Renderer {
   private gl: WebGL2RenderingContext;
   private canvas: HTMLCanvasElement;
 
-  // Main pass
-  private program: WebGLProgram;
-  private uModel: WebGLUniformLocation | null;
-  private uViewProj: WebGLUniformLocation | null;
-  private uTexture: WebGLUniformLocation | null;
-  private uNormalMap: WebGLUniformLocation | null;
-  private uShadowMap: WebGLUniformLocation | null;
-  private uLightPos: WebGLUniformLocation | null;
-  private uCameraPos: WebGLUniformLocation | null;
-  private uHasNormalMap: WebGLUniformLocation | null;
-  private uLightViewProj: WebGLUniformLocation | null;
+  // G-Buffer geometry pass
+  private gBufProgram: WebGLProgram;
+  private gBufUModel: WebGLUniformLocation | null;
+  private gBufUViewProj: WebGLUniformLocation | null;
+  private gBufUTexture: WebGLUniformLocation | null;
+  private gBufUNormalMap: WebGLUniformLocation | null;
+  private gBufUHasNormalMap: WebGLUniformLocation | null;
+
+  // G-Buffer FBO + textures
+  private gBufFBO: WebGLFramebuffer;
+  private gPositionTex: WebGLTexture;
+  private gNormalTex: WebGLTexture;
+  private gAlbedoTex: WebGLTexture;
+  private gDepthRBO: WebGLRenderbuffer;
+  private gBufWidth = 0;
+  private gBufHeight = 0;
+
+  // Lighting pass
+  private lightProgram: WebGLProgram;
+  private lightUGPosition: WebGLUniformLocation | null;
+  private lightUGNormal: WebGLUniformLocation | null;
+  private lightUGAlbedo: WebGLUniformLocation | null;
+  private lightUShadowMap: WebGLUniformLocation | null;
+  private lightULightPos: WebGLUniformLocation | null;
+  private lightUCameraPos: WebGLUniformLocation | null;
+  private lightULightViewProj: WebGLUniformLocation | null;
+  private fullscreenVAO: WebGLVertexArrayObject;
 
   // Shadow pass
   private shadowProgram: WebGLProgram;
@@ -170,19 +258,39 @@ export class WebGL2Renderer implements Renderer {
     if (!gl) throw new Error("WebGL2 not supported");
     this.gl = gl;
 
-    // Main pass
-    this.program = this.buildProgram(VERT_SRC, FRAG_SRC);
-    this.uModel = gl.getUniformLocation(this.program, "uModel");
-    this.uViewProj = gl.getUniformLocation(this.program, "uViewProj");
-    this.uTexture = gl.getUniformLocation(this.program, "uTexture");
-    this.uNormalMap = gl.getUniformLocation(this.program, "uNormalMap");
-    this.uShadowMap = gl.getUniformLocation(this.program, "uShadowMap");
-    this.uLightPos = gl.getUniformLocation(this.program, "uLightPos");
-    this.uCameraPos = gl.getUniformLocation(this.program, "uCameraPos");
-    this.uHasNormalMap = gl.getUniformLocation(this.program, "uHasNormalMap");
-    this.uLightViewProj = gl.getUniformLocation(this.program, "uLightViewProj");
+    // Need EXT_color_buffer_float for RGBA16F render targets
+    const cbfExt = gl.getExtension("EXT_color_buffer_float");
+    if (!cbfExt) throw new Error("EXT_color_buffer_float not supported — required for deferred rendering");
 
-    // Shadow pass
+    // ---- G-Buffer geometry pass ----
+    this.gBufProgram = this.buildProgram(GBUF_VERT, GBUF_FRAG);
+    this.gBufUModel = gl.getUniformLocation(this.gBufProgram, "uModel");
+    this.gBufUViewProj = gl.getUniformLocation(this.gBufProgram, "uViewProj");
+    this.gBufUTexture = gl.getUniformLocation(this.gBufProgram, "uTexture");
+    this.gBufUNormalMap = gl.getUniformLocation(this.gBufProgram, "uNormalMap");
+    this.gBufUHasNormalMap = gl.getUniformLocation(this.gBufProgram, "uHasNormalMap");
+
+    // ---- G-Buffer FBO (created at correct size in resize/rebuildGBuffer) ----
+    this.gBufFBO = gl.createFramebuffer()!;
+    this.gPositionTex = gl.createTexture()!;
+    this.gNormalTex = gl.createTexture()!;
+    this.gAlbedoTex = gl.createTexture()!;
+    this.gDepthRBO = gl.createRenderbuffer()!;
+
+    // ---- Lighting pass ----
+    this.lightProgram = this.buildProgram(LIGHT_VERT, LIGHT_FRAG);
+    this.lightUGPosition = gl.getUniformLocation(this.lightProgram, "uGPosition");
+    this.lightUGNormal = gl.getUniformLocation(this.lightProgram, "uGNormal");
+    this.lightUGAlbedo = gl.getUniformLocation(this.lightProgram, "uGAlbedo");
+    this.lightUShadowMap = gl.getUniformLocation(this.lightProgram, "uShadowMap");
+    this.lightULightPos = gl.getUniformLocation(this.lightProgram, "uLightPos");
+    this.lightUCameraPos = gl.getUniformLocation(this.lightProgram, "uCameraPos");
+    this.lightULightViewProj = gl.getUniformLocation(this.lightProgram, "uLightViewProj");
+
+    // Empty VAO for the fullscreen triangle (uses gl_VertexID, no attributes)
+    this.fullscreenVAO = gl.createVertexArray()!;
+
+    // ---- Shadow pass ----
     this.shadowProgram = this.buildProgram(SHADOW_VERT, SHADOW_FRAG);
     this.uShadowModel = gl.getUniformLocation(this.shadowProgram, "uModel");
     this.uShadowLightVP = gl.getUniformLocation(this.shadowProgram, "uLightViewProj");
@@ -206,10 +314,60 @@ export class WebGL2Renderer implements Renderer {
 
     gl.enable(gl.DEPTH_TEST);
 
+    // 1x1 flat normal texture (tangent-space up)
     this.flatNormalTex = gl.createTexture()!;
     gl.bindTexture(gl.TEXTURE_2D, this.flatNormalTex);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE,
       new Uint8Array([128, 128, 255, 255]));
+  }
+
+  // Rebuild G-Buffer textures when the canvas size changes.
+  private rebuildGBuffer(w: number, h: number): void {
+    const gl = this.gl;
+    this.gBufWidth = w;
+    this.gBufHeight = h;
+
+    // Position — RGBA16F (world-space XYZ, alpha flags occupancy)
+    gl.bindTexture(gl.TEXTURE_2D, this.gPositionTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, w, h, 0, gl.RGBA, gl.FLOAT, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+    // Normal — RGBA16F (world-space normal)
+    gl.bindTexture(gl.TEXTURE_2D, this.gNormalTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, w, h, 0, gl.RGBA, gl.FLOAT, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+    // Albedo — RGBA8
+    gl.bindTexture(gl.TEXTURE_2D, this.gAlbedoTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+    // Depth renderbuffer
+    gl.bindRenderbuffer(gl.RENDERBUFFER, this.gDepthRBO);
+    gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, w, h);
+
+    // Attach to FBO
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.gBufFBO);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.gPositionTex, 0);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, this.gNormalTex, 0);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT2, gl.TEXTURE_2D, this.gAlbedoTex, 0);
+    gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, this.gDepthRBO);
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1, gl.COLOR_ATTACHMENT2]);
+
+    const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+    if (status !== gl.FRAMEBUFFER_COMPLETE) {
+      throw new Error(`G-Buffer FBO incomplete: 0x${status.toString(16)}`);
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   }
 
   createMesh(data: Float32Array, layout: VertexLayout[]): GL2MeshHandle {
@@ -253,12 +411,16 @@ export class WebGL2Renderer implements Renderer {
       this.canvas.width = w;
       this.canvas.height = h;
     }
+    // Rebuild G-Buffer if canvas size changed
+    if (this.gBufWidth !== w || this.gBufHeight !== h) {
+      this.rebuildGBuffer(w, h);
+    }
   }
 
   renderFrame(drawCalls: DrawCall[], u: FrameUniforms): void {
     const gl = this.gl;
 
-    // ---- Shadow pass (all objects) ----
+    // ---- Pass 1: Shadow (all objects, depth only) ----
     if (u.lightViewProj) {
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.shadowFBO);
       gl.viewport(0, 0, SHADOW_SIZE, SHADOW_SIZE);
@@ -281,46 +443,73 @@ export class WebGL2Renderer implements Renderer {
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     }
 
-    // ---- Main pass (all objects) ----
-    gl.viewport(0, 0, this.canvas.width, this.canvas.height);
-    gl.clearColor(0.08, 0.08, 0.12, 1.0);
+    // ---- Pass 2: G-Buffer geometry (all objects → MRT) ----
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.gBufFBO);
+    gl.viewport(0, 0, this.gBufWidth, this.gBufHeight);
+    gl.clearColor(0.0, 0.0, 0.0, 0.0); // alpha=0 marks empty pixels
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
-    gl.useProgram(this.program);
-    gl.uniformMatrix4fv(this.uViewProj, false, u.viewProj);
-    gl.uniform3fv(this.uLightPos, u.lightPos as unknown as Float32Array);
-    gl.uniform3fv(this.uCameraPos, u.cameraPos as unknown as Float32Array);
-
-    if (u.lightViewProj) {
-      gl.uniformMatrix4fv(this.uLightViewProj, false, u.lightViewProj);
-    }
-
-    // Shadow map on unit 2
-    gl.activeTexture(gl.TEXTURE2);
-    gl.bindTexture(gl.TEXTURE_2D, this.shadowDepthTex);
-    gl.uniform1i(this.uShadowMap, 2);
+    gl.useProgram(this.gBufProgram);
+    gl.uniformMatrix4fv(this.gBufUViewProj, false, u.viewProj);
 
     for (const dc of drawCalls) {
       const mesh = dc.mesh as GL2MeshHandle;
       const tex = dc.texture as GL2TextureHandle;
 
-      gl.uniformMatrix4fv(this.uModel, false, dc.model);
+      gl.uniformMatrix4fv(this.gBufUModel, false, dc.model);
 
       // Unit 0: albedo
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, tex.texture);
-      gl.uniform1i(this.uTexture, 0);
+      gl.uniform1i(this.gBufUTexture, 0);
 
       // Unit 1: normal map
       gl.activeTexture(gl.TEXTURE1);
       const hasNormal = !!dc.normalMap;
       gl.bindTexture(gl.TEXTURE_2D, hasNormal ? (dc.normalMap as GL2TextureHandle).texture : this.flatNormalTex);
-      gl.uniform1i(this.uNormalMap, 1);
-      gl.uniform1i(this.uHasNormalMap, hasNormal ? 1 : 0);
+      gl.uniform1i(this.gBufUNormalMap, 1);
+      gl.uniform1i(this.gBufUHasNormalMap, hasNormal ? 1 : 0);
 
       gl.bindVertexArray(mesh.vao);
       gl.drawArrays(gl.TRIANGLES, 0, mesh.vertexCount);
     }
+
+    // ---- Pass 3: Lighting (fullscreen quad, reads G-Buffer + shadow map) ----
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+    gl.useProgram(this.lightProgram);
+
+    // Bind G-Buffer textures
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.gPositionTex);
+    gl.uniform1i(this.lightUGPosition, 0);
+
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.gNormalTex);
+    gl.uniform1i(this.lightUGNormal, 1);
+
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, this.gAlbedoTex);
+    gl.uniform1i(this.lightUGAlbedo, 2);
+
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, this.shadowDepthTex);
+    gl.uniform1i(this.lightUShadowMap, 3);
+
+    // Lighting uniforms
+    gl.uniform3fv(this.lightULightPos, u.lightPos as unknown as Float32Array);
+    gl.uniform3fv(this.lightUCameraPos, u.cameraPos as unknown as Float32Array);
+    if (u.lightViewProj) {
+      gl.uniformMatrix4fv(this.lightULightViewProj, false, u.lightViewProj);
+    }
+
+    // Draw fullscreen triangle (3 vertices, empty VAO, shader uses gl_VertexID)
+    gl.disable(gl.DEPTH_TEST);
+    gl.bindVertexArray(this.fullscreenVAO);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.enable(gl.DEPTH_TEST);
   }
 
   get aspect(): number {

@@ -11,25 +11,27 @@
 //   [x] Step 9 — Normal Mapping
 //   [x] Step 10 — Shadow Mapping
 //   [x] Step 11 — Multiple Objects / Scene Graph
-//   [ ] Step 12 — Deferred Rendering
+//   [x] Step 12 — Deferred Rendering
 //   [ ] Step 13 — Post-Processing (bloom, tone mapping)
 //   [ ] Step 14 — Skeletal Animation
 
-// Step 11: Multiple Objects / Scene Graph
+// Step 12: Deferred Rendering
 //
-// Until now we drew a single mesh per frame. Real scenes have many objects —
-// a ground plane, multiple props, characters, etc. This step:
+// The forward renderer (Step 11) computed lighting per-fragment for every
+// object drawn. Deferred rendering splits this into two phases:
 //
-//   1. Refactors the Renderer interface: `renderFrame(drawCalls[], frameUniforms)`
-//      replaces the old `beginFrame()` + `draw()` pattern. The renderer handles
-//      the shadow pass and main pass for ALL objects in one call.
+//   1. G-Buffer pass — render ALL geometry into 3 textures via MRT:
+//        - Position  (RGBA16F) — world-space XYZ + occupancy flag
+//        - Normal    (RGBA16F) — world-space normal (with normal mapping)
+//        - Albedo    (RGBA8)   — texture color
+//      No lighting math here — just material + geometry storage.
 //
-//   2. Adds a **ground plane** that receives the torus's shadow. The plane uses
-//      the same checkerboard + normal map textures but with its own transform.
+//   2. Lighting pass — a fullscreen triangle reads the G-Buffer textures
+//      and shadow map, computes Phong shading in screen space. This runs
+//      once regardless of object count.
 //
-//   3. Each frame builds an array of DrawCall objects, each with its own mesh,
-//      texture, normal map, and model matrix. This is a flat scene graph — no
-//      parent-child hierarchy yet, but the pattern extends naturally.
+// The shadow pass remains unchanged (depth-only from light's POV).
+// The WebGPU backend stays forward-rendered for now.
 
 import { mat4, vec3 } from "gl-matrix";
 import type { Renderer, MeshHandle, TextureHandle, DrawCall } from "./engine";
