@@ -7,7 +7,7 @@
 //   [x] Step 5 — Lighting (Phong)
 //   [x] Step 6 — Abstraction Layer
 //   [x] Step 7 — WebGPU Backend
-//   [ ] Step 8 — OBJ Mesh Loading
+//   [x] Step 8 — OBJ Mesh Loading
 //   [ ] Step 9 — Normal Mapping
 //   [ ] Step 10 — Shadow Mapping
 //   [ ] Step 11 — Multiple Objects / Scene Graph
@@ -15,29 +15,26 @@
 //   [ ] Step 13 — Post-Processing (bloom, tone mapping)
 //   [ ] Step 14 — Skeletal Animation
 
-// Step 7: WebGPU Backend
+// Step 8: OBJ Mesh Loading
 //
-// Step 6 extracted reusable abstractions, but they were still WebGL2-specific.
-// Now we introduce a **Renderer interface** and two implementations:
+// Until now we hardcoded cube geometry inline. Real 3D apps load meshes from
+// files — the most common simple format is Wavefront .obj. We wrote a parser
+// in src/objParser.ts that handles:
+//   - v (positions), vt (texcoords), vn (normals)
+//   - f (faces) with v/vt/vn indexing and fan triangulation for polygons
 //
-//   - **WebGL2Renderer** — wraps the WebGL2 code from Steps 1–6.
-//   - **WebGPURenderer** — a new backend using the WebGPU API with WGSL shaders.
+// The parser outputs an interleaved Float32Array that matches our existing
+// vertex layout (pos.xyz, uv.uv, normal.xyz) — so both WebGL2 and WebGPU
+// renderers work without changes.
 //
-// At startup we try WebGPU first (it's the future of web graphics), and fall
-// back to WebGL2 if it's not available. The main loop is identical either way —
-// it just calls renderer.beginFrame(), renderer.draw(), etc.
-//
-// Key differences in WebGPU:
-//   - Shaders are written in **WGSL** instead of GLSL.
-//   - State is baked into a **GPURenderPipeline** (no mutable GL state machine).
-//   - Uniforms/textures are passed via **bind groups** (like Vulkan descriptors).
-//   - Commands are recorded into a **GPUCommandEncoder**, then submitted as a batch.
-//   - Initialization is **async** (requesting adapter and device returns Promises).
+// We also wrote a script (scripts/generateTorus.ts) that procedurally creates
+// a torus .obj file, giving us a more interesting model to light and rotate.
 
 import { mat4, vec3 } from "gl-matrix";
 import type { Renderer, MeshHandle, TextureHandle } from "./engine";
 import { WebGPURenderer } from "./engine";
 import { WebGL2Renderer } from "./engine";
+import { parseObj } from "./objParser";
 
 // ---------------------------------------------------------------------------
 // Initialize renderer — try WebGPU first, fall back to WebGL2
@@ -60,33 +57,23 @@ async function createRenderer(): Promise<Renderer & { aspect: number }> {
 }
 
 // ---------------------------------------------------------------------------
-// Cube geometry data — shared between both backends
+// Load OBJ model
 // ---------------------------------------------------------------------------
 
-function face(
-  positions: number[][],
-  normal: number[],
-  uvs: number[][]
-): number[] {
-  const indices = [0, 1, 2, 0, 2, 3];
-  const out: number[] = [];
-  for (const i of indices) {
-    out.push(...positions[i], ...uvs[i], ...normal);
-  }
-  return out;
+async function loadObj(url: string): Promise<Float32Array> {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`Failed to fetch ${url}: ${response.status}`);
+  const text = await response.text();
+  const result = parseObj(text);
+  console.log(`Loaded ${url}: ${result.triangleCount} triangles`);
+  return result.vertices;
 }
 
-// prettier-ignore
-const CUBE_DATA = new Float32Array([
-  ...face([[-0.5,-0.5, 0.5],[ 0.5,-0.5, 0.5],[ 0.5, 0.5, 0.5],[-0.5, 0.5, 0.5]], [0,0,1], [[0,0],[1,0],[1,1],[0,1]]),
-  ...face([[ 0.5,-0.5,-0.5],[-0.5,-0.5,-0.5],[-0.5, 0.5,-0.5],[ 0.5, 0.5,-0.5]], [0,0,-1], [[0,0],[1,0],[1,1],[0,1]]),
-  ...face([[-0.5, 0.5, 0.5],[ 0.5, 0.5, 0.5],[ 0.5, 0.5,-0.5],[-0.5, 0.5,-0.5]], [0,1,0], [[0,0],[1,0],[1,1],[0,1]]),
-  ...face([[-0.5,-0.5,-0.5],[ 0.5,-0.5,-0.5],[ 0.5,-0.5, 0.5],[-0.5,-0.5, 0.5]], [0,-1,0], [[0,0],[1,0],[1,1],[0,1]]),
-  ...face([[ 0.5,-0.5, 0.5],[ 0.5,-0.5,-0.5],[ 0.5, 0.5,-0.5],[ 0.5, 0.5, 0.5]], [1,0,0], [[0,0],[1,0],[1,1],[0,1]]),
-  ...face([[-0.5,-0.5,-0.5],[-0.5,-0.5, 0.5],[-0.5, 0.5, 0.5],[-0.5, 0.5,-0.5]], [-1,0,0], [[0,0],[1,0],[1,1],[0,1]]),
-]);
+// ---------------------------------------------------------------------------
+// Vertex layout — shared between OBJ data and both backends
+// ---------------------------------------------------------------------------
 
-const CUBE_LAYOUT = [
+const VERTEX_LAYOUT = [
   { location: 0, size: 3 }, // position
   { location: 1, size: 2 }, // texcoord
   { location: 2, size: 3 }, // normal
@@ -161,13 +148,16 @@ canvas.addEventListener("wheel", (e) => {
 }, { passive: false });
 
 // ---------------------------------------------------------------------------
-// Main — async because WebGPU init is async
+// Main — async because WebGPU init and OBJ loading are async
 // ---------------------------------------------------------------------------
 
 async function main() {
-  const renderer = await createRenderer();
+  const [renderer, meshData] = await Promise.all([
+    createRenderer(),
+    loadObj("models/torus.obj"),
+  ]);
 
-  const mesh: MeshHandle = renderer.createMesh(CUBE_DATA, CUBE_LAYOUT);
+  const mesh: MeshHandle = renderer.createMesh(meshData, VERTEX_LAYOUT);
   const texture: TextureHandle = renderer.createTexture({
     width: TEX_SIZE,
     height: TEX_SIZE,
