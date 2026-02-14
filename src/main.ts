@@ -4,25 +4,30 @@
 //   [x] Step 2 — Transformations (rotating 3D cube)
 //   [x] Step 3 — Interactive Camera
 //   [x] Step 4 — Textures
-//   [ ] Step 5 — Lighting (Phong)
+//   [x] Step 5 — Lighting (Phong)
 //   [ ] Step 6 — Abstraction Layer
 //   [ ] Step 7 — WebGPU Backend
 
-// Step 4: Textures
+// Step 5: Phong Lighting
 //
-// Step 3 colored each face with a flat color passed as a vertex attribute.
-// Now we replace that color with a **texture lookup**. Each vertex gets a UV
-// coordinate (2D position on the texture image, 0–1 range), and the fragment
-// shader samples the texture at the interpolated UV.
+// Step 4 textured each face, but every face was equally bright regardless of
+// its angle to the light. Now we add **Phong lighting**, the standard model
+// for basic 3D shading:
 //
-// Key concepts:
-//   - **UV coordinates** — 2D coordinates that map each vertex to a point on
-//     the texture. (0,0) is bottom-left, (1,1) is top-right.
-//   - **Texture unit** — a slot the GPU uses to hold a texture for sampling.
-//     We bind our texture to unit 0 and tell the sampler uniform to use it.
-//   - **sampler2D** — the GLSL type for a 2D texture sampler.
+//   color = ambient + diffuse + specular
 //
-// We generate a checkerboard procedurally so we don't need any image files.
+// - **Ambient**: constant low-level illumination so nothing is pure black.
+// - **Diffuse**: brightness proportional to cos(angle between normal and light).
+//   Surfaces facing the light are bright; surfaces edge-on are dark.
+// - **Specular**: bright highlight where the reflection vector aligns with the
+//   view direction. Makes surfaces look shiny.
+//
+// New data needed per vertex: **normals** — the direction each face points.
+// For a cube, all vertices on a face share the same normal (e.g. front face
+// normal is [0, 0, 1]).
+//
+// We also need separate Model and View matrices in the shader (not just MVP)
+// so we can transform normals and compute world-space lighting.
 
 import { mat4, vec3 } from "gl-matrix";
 
@@ -44,32 +49,70 @@ const gl: WebGL2RenderingContext = maybeGl;
 // Shader source code
 // ---------------------------------------------------------------------------
 
-// Vertex shader — now passes UV coordinates instead of color.
+// Vertex shader — now outputs world-space position and normal for lighting.
+// We pass the model matrix separately so we can transform the normal correctly.
+// The **normal matrix** is the transpose of the inverse of the upper-left 3×3
+// of the model matrix. For uniform scaling (our case), the model matrix itself
+// works fine for normals — we just need to re-normalize.
 const vertexShaderSource = `#version 300 es
 
 layout(location = 0) in vec3 aPosition;
 layout(location = 1) in vec2 aTexCoord;
+layout(location = 2) in vec3 aNormal;
 
-uniform mat4 uMVP;
+uniform mat4 uModel;
+uniform mat4 uViewProj;
 
 out vec2 vTexCoord;
+out vec3 vWorldPos;
+out vec3 vNormal;
 
 void main() {
+  vec4 worldPos = uModel * vec4(aPosition, 1.0);
+  vWorldPos = worldPos.xyz;
+  // Transform normal to world space. Normalize because the model matrix
+  // may contain non-uniform scale (though ours doesn't currently).
+  vNormal = normalize(mat3(uModel) * aNormal);
   vTexCoord = aTexCoord;
-  gl_Position = uMVP * vec4(aPosition, 1.0);
+  gl_Position = uViewProj * worldPos;
 }
 `;
 
-// Fragment shader — samples a texture instead of using a vertex color.
+// Fragment shader — Phong lighting applied to the texture color.
 const fragmentShaderSource = `#version 300 es
 precision mediump float;
 
 in vec2 vTexCoord;
+in vec3 vWorldPos;
+in vec3 vNormal;
+
 uniform sampler2D uTexture;
+uniform vec3 uLightPos;    // world-space light position
+uniform vec3 uCameraPos;   // world-space camera position
+
 out vec4 fragColor;
 
 void main() {
-  fragColor = texture(uTexture, vTexCoord);
+  vec3 texColor = texture(uTexture, vTexCoord).rgb;
+
+  // Normalize the interpolated normal (interpolation can de-normalize it).
+  vec3 N = normalize(vNormal);
+  vec3 L = normalize(uLightPos - vWorldPos);  // direction to light
+  vec3 V = normalize(uCameraPos - vWorldPos); // direction to camera
+  vec3 R = reflect(-L, N);                    // reflection of light around normal
+
+  // Ambient — constant base light so back faces aren't pure black.
+  float ambient = 0.15;
+
+  // Diffuse — Lambert's cosine law: max(dot(N, L), 0).
+  float diffuse = max(dot(N, L), 0.0);
+
+  // Specular — Phong: pow(max(dot(R, V), 0), shininess).
+  // Higher shininess = tighter, shinier highlight.
+  float specular = pow(max(dot(R, V), 0.0), 32.0);
+
+  vec3 color = texColor * (ambient + diffuse) + vec3(1.0) * specular * 0.5;
+  fragColor = vec4(color, 1.0);
 }
 `;
 
@@ -127,65 +170,72 @@ function createProgram(
 // ---------------------------------------------------------------------------
 
 const program = createProgram(vertexShaderSource, fragmentShaderSource);
-const uMVPLoc = gl.getUniformLocation(program, "uMVP");
+const uModelLoc = gl.getUniformLocation(program, "uModel");
+const uViewProjLoc = gl.getUniformLocation(program, "uViewProj");
 const uTextureLoc = gl.getUniformLocation(program, "uTexture");
+const uLightPosLoc = gl.getUniformLocation(program, "uLightPos");
+const uCameraPosLoc = gl.getUniformLocation(program, "uCameraPos");
 
 // ---------------------------------------------------------------------------
-// Vertex data — a cube with UV coordinates per face
+// Vertex data — a cube with UVs and normals
 // ---------------------------------------------------------------------------
 
-// Each vertex: x, y, z, u, v (5 floats = 20 bytes).
-// Each face maps the full 0–1 UV range so the entire texture appears on each face.
+// Each vertex: x, y, z, u, v, nx, ny, nz (8 floats = 32 bytes).
+// Normals point outward from each face.
+
+// Helper: generate 6 vertices (2 triangles) for one face.
+function face(
+  positions: number[][],   // 4 corners in CCW order
+  normal: number[],
+  uvs: number[][]          // 4 UV coords matching the corners
+): number[] {
+  // Two triangles: 0-1-2 and 0-2-3.
+  const indices = [0, 1, 2, 0, 2, 3];
+  const out: number[] = [];
+  for (const i of indices) {
+    out.push(...positions[i], ...uvs[i], ...normal);
+  }
+  return out;
+}
 
 // prettier-ignore
 const vertices = new Float32Array([
-  // Front face (z = +0.5)
-  -0.5, -0.5,  0.5,   0.0, 0.0,
-   0.5, -0.5,  0.5,   1.0, 0.0,
-   0.5,  0.5,  0.5,   1.0, 1.0,
-  -0.5, -0.5,  0.5,   0.0, 0.0,
-   0.5,  0.5,  0.5,   1.0, 1.0,
-  -0.5,  0.5,  0.5,   0.0, 1.0,
-
-  // Back face (z = -0.5)
-   0.5, -0.5, -0.5,   0.0, 0.0,
-  -0.5, -0.5, -0.5,   1.0, 0.0,
-  -0.5,  0.5, -0.5,   1.0, 1.0,
-   0.5, -0.5, -0.5,   0.0, 0.0,
-  -0.5,  0.5, -0.5,   1.0, 1.0,
-   0.5,  0.5, -0.5,   0.0, 1.0,
-
-  // Top face (y = +0.5)
-  -0.5,  0.5,  0.5,   0.0, 0.0,
-   0.5,  0.5,  0.5,   1.0, 0.0,
-   0.5,  0.5, -0.5,   1.0, 1.0,
-  -0.5,  0.5,  0.5,   0.0, 0.0,
-   0.5,  0.5, -0.5,   1.0, 1.0,
-  -0.5,  0.5, -0.5,   0.0, 1.0,
-
-  // Bottom face (y = -0.5)
-  -0.5, -0.5, -0.5,   0.0, 0.0,
-   0.5, -0.5, -0.5,   1.0, 0.0,
-   0.5, -0.5,  0.5,   1.0, 1.0,
-  -0.5, -0.5, -0.5,   0.0, 0.0,
-   0.5, -0.5,  0.5,   1.0, 1.0,
-  -0.5, -0.5,  0.5,   0.0, 1.0,
-
-  // Right face (x = +0.5)
-   0.5, -0.5,  0.5,   0.0, 0.0,
-   0.5, -0.5, -0.5,   1.0, 0.0,
-   0.5,  0.5, -0.5,   1.0, 1.0,
-   0.5, -0.5,  0.5,   0.0, 0.0,
-   0.5,  0.5, -0.5,   1.0, 1.0,
-   0.5,  0.5,  0.5,   0.0, 1.0,
-
-  // Left face (x = -0.5)
-  -0.5, -0.5, -0.5,   0.0, 0.0,
-  -0.5, -0.5,  0.5,   1.0, 0.0,
-  -0.5,  0.5,  0.5,   1.0, 1.0,
-  -0.5, -0.5, -0.5,   0.0, 0.0,
-  -0.5,  0.5,  0.5,   1.0, 1.0,
-  -0.5,  0.5, -0.5,   0.0, 1.0,
+  // Front face (z = +0.5), normal [0, 0, 1]
+  ...face(
+    [[-0.5,-0.5, 0.5],[ 0.5,-0.5, 0.5],[ 0.5, 0.5, 0.5],[-0.5, 0.5, 0.5]],
+    [0, 0, 1],
+    [[0,0],[1,0],[1,1],[0,1]]
+  ),
+  // Back face (z = -0.5), normal [0, 0, -1]
+  ...face(
+    [[ 0.5,-0.5,-0.5],[-0.5,-0.5,-0.5],[-0.5, 0.5,-0.5],[ 0.5, 0.5,-0.5]],
+    [0, 0, -1],
+    [[0,0],[1,0],[1,1],[0,1]]
+  ),
+  // Top face (y = +0.5), normal [0, 1, 0]
+  ...face(
+    [[-0.5, 0.5, 0.5],[ 0.5, 0.5, 0.5],[ 0.5, 0.5,-0.5],[-0.5, 0.5,-0.5]],
+    [0, 1, 0],
+    [[0,0],[1,0],[1,1],[0,1]]
+  ),
+  // Bottom face (y = -0.5), normal [0, -1, 0]
+  ...face(
+    [[-0.5,-0.5,-0.5],[ 0.5,-0.5,-0.5],[ 0.5,-0.5, 0.5],[-0.5,-0.5, 0.5]],
+    [0, -1, 0],
+    [[0,0],[1,0],[1,1],[0,1]]
+  ),
+  // Right face (x = +0.5), normal [1, 0, 0]
+  ...face(
+    [[ 0.5,-0.5, 0.5],[ 0.5,-0.5,-0.5],[ 0.5, 0.5,-0.5],[ 0.5, 0.5, 0.5]],
+    [1, 0, 0],
+    [[0,0],[1,0],[1,1],[0,1]]
+  ),
+  // Left face (x = -0.5), normal [-1, 0, 0]
+  ...face(
+    [[-0.5,-0.5,-0.5],[-0.5,-0.5, 0.5],[-0.5, 0.5, 0.5],[-0.5, 0.5,-0.5]],
+    [-1, 0, 0],
+    [[0,0],[1,0],[1,1],[0,1]]
+  ),
 ]);
 
 // ---------------------------------------------------------------------------
@@ -200,19 +250,23 @@ gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
 // Vertex Array Object (VAO) — describe the memory layout
 // ---------------------------------------------------------------------------
 
-// 5 floats per vertex (3 pos + 2 uv) = 20 bytes stride.
+// 8 floats per vertex (3 pos + 2 uv + 3 normal) = 32 bytes stride.
 const vao = gl.createVertexArray();
 gl.bindVertexArray(vao);
 
-const STRIDE = 5 * Float32Array.BYTES_PER_ELEMENT; // 20 bytes
+const STRIDE = 8 * Float32Array.BYTES_PER_ELEMENT; // 32 bytes
 
 // Attribute 0: position (vec3)
 gl.enableVertexAttribArray(0);
 gl.vertexAttribPointer(0, 3, gl.FLOAT, false, STRIDE, 0);
 
-// Attribute 1: texcoord (vec2) — starts at byte offset 12 (after 3 position floats).
+// Attribute 1: texcoord (vec2) — offset 12
 gl.enableVertexAttribArray(1);
 gl.vertexAttribPointer(1, 2, gl.FLOAT, false, STRIDE, 3 * Float32Array.BYTES_PER_ELEMENT);
+
+// Attribute 2: normal (vec3) — offset 20
+gl.enableVertexAttribArray(2);
+gl.vertexAttribPointer(2, 3, gl.FLOAT, false, STRIDE, 5 * Float32Array.BYTES_PER_ELEMENT);
 
 gl.bindVertexArray(null);
 
@@ -220,8 +274,6 @@ gl.bindVertexArray(null);
 // Generate a checkerboard texture procedurally
 // ---------------------------------------------------------------------------
 
-// 8×8 checkerboard, each cell is 1 pixel. We'll let GL_NEAREST filtering keep
-// the hard pixel edges visible — this is the classic "programmer art" texture.
 const TEX_SIZE = 8;
 const texData = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
 
@@ -240,8 +292,6 @@ for (let row = 0; row < TEX_SIZE; row++) {
 const texture = gl.createTexture();
 gl.bindTexture(gl.TEXTURE_2D, texture);
 gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, TEX_SIZE, TEX_SIZE, 0, gl.RGBA, gl.UNSIGNED_BYTE, texData);
-
-// NEAREST filtering — no blurring between checkerboard cells.
 gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
 gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
 
@@ -328,13 +378,13 @@ canvas.addEventListener("wheel", (e) => {
 }, { passive: false });
 
 // ---------------------------------------------------------------------------
-// MVP matrices
+// Matrices
 // ---------------------------------------------------------------------------
 
 const model = mat4.create();
 const view = mat4.create();
 const proj = mat4.create();
-const mvp = mat4.create();
+const viewProj = mat4.create();
 
 // ---------------------------------------------------------------------------
 // Render loop
@@ -352,7 +402,7 @@ function frame(time: DOMHighResTimeStamp) {
   mat4.rotateY(model, model, angle);
   mat4.rotateX(model, model, angle * 0.7);
 
-  // --- View matrix: camera on an orbit sphere ---
+  // --- View matrix ---
   const eye = cameraPosition();
   mat4.lookAt(view, eye, [0, 0, 0], [0, 1, 0]);
 
@@ -360,15 +410,23 @@ function frame(time: DOMHighResTimeStamp) {
   const aspect = canvas.width / canvas.height;
   mat4.perspective(proj, Math.PI / 4, aspect, 0.1, 100.0);
 
-  // --- Combine: MVP = Projection × View × Model ---
-  mat4.multiply(mvp, proj, view);
-  mat4.multiply(mvp, mvp, model);
+  // --- ViewProj = Projection × View (Model sent separately for lighting) ---
+  mat4.multiply(viewProj, proj, view);
 
   // --- Draw ---
   gl.useProgram(program);
-  gl.uniformMatrix4fv(uMVPLoc, false, mvp);
+  gl.uniformMatrix4fv(uModelLoc, false, model);
+  gl.uniformMatrix4fv(uViewProjLoc, false, viewProj);
 
-  // Bind our checkerboard texture to texture unit 0 and point the sampler at it.
+  // Light orbits slowly so you can see the shading change.
+  const lightAngle = time * 0.0005;
+  gl.uniform3f(uLightPosLoc,
+    3.0 * Math.cos(lightAngle),
+    2.0,
+    3.0 * Math.sin(lightAngle)
+  );
+  gl.uniform3fv(uCameraPosLoc, eye);
+
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D, texture);
   gl.uniform1i(uTextureLoc, 0);
