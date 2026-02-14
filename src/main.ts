@@ -5,31 +5,28 @@
 //   [x] Step 3 — Interactive Camera
 //   [x] Step 4 — Textures
 //   [x] Step 5 — Lighting (Phong)
-//   [ ] Step 6 — Abstraction Layer
+//   [x] Step 6 — Abstraction Layer
 //   [ ] Step 7 — WebGPU Backend
 
-// Step 5: Phong Lighting
+// Step 6: Abstraction Layer
 //
-// Step 4 textured each face, but every face was equally bright regardless of
-// its angle to the light. Now we add **Phong lighting**, the standard model
-// for basic 3D shading:
+// Steps 1–5 built everything in one flat file with raw WebGL calls. Now we
+// extract the repeating patterns into reusable classes:
 //
-//   color = ambient + diffuse + specular
+//   - **ShaderProgram** — compiles/links GLSL, caches uniform locations,
+//     provides typed setters (setMat4, setVec3, etc.).
+//   - **Mesh** — takes a Float32Array and a vertex attribute layout, creates
+//     the VBO + VAO automatically. Computes stride and offsets for you.
+//   - **Texture** — wraps texture creation, parameter setup, and binding.
 //
-// - **Ambient**: constant low-level illumination so nothing is pure black.
-// - **Diffuse**: brightness proportional to cos(angle between normal and light).
-//   Surfaces facing the light are bright; surfaces edge-on are dark.
-// - **Specular**: bright highlight where the reflection vector aligns with the
-//   view direction. Makes surfaces look shiny.
+// The rendering logic in main.ts is now much shorter and focuses on the
+// scene description (what to draw) rather than GPU plumbing (how to draw).
 //
-// New data needed per vertex: **normals** — the direction each face points.
-// For a cube, all vertices on a face share the same normal (e.g. front face
-// normal is [0, 0, 1]).
-//
-// We also need separate Model and View matrices in the shader (not just MVP)
-// so we can transform normals and compute world-space lighting.
+// These abstractions are deliberately thin — just enough to remove boilerplate,
+// not so much that they hide what WebGL is doing.
 
 import { mat4, vec3 } from "gl-matrix";
+import { ShaderProgram, Mesh, Texture } from "./engine";
 
 // ---------------------------------------------------------------------------
 // Canvas + WebGL2 context
@@ -46,14 +43,9 @@ if (!maybeGl) {
 const gl: WebGL2RenderingContext = maybeGl;
 
 // ---------------------------------------------------------------------------
-// Shader source code
+// Shaders (source is still inline — no build-time magic)
 // ---------------------------------------------------------------------------
 
-// Vertex shader — now outputs world-space position and normal for lighting.
-// We pass the model matrix separately so we can transform the normal correctly.
-// The **normal matrix** is the transpose of the inverse of the upper-left 3×3
-// of the model matrix. For uniform scaling (our case), the model matrix itself
-// works fine for normals — we just need to re-normalize.
 const vertexShaderSource = `#version 300 es
 
 layout(location = 0) in vec3 aPosition;
@@ -70,15 +62,12 @@ out vec3 vNormal;
 void main() {
   vec4 worldPos = uModel * vec4(aPosition, 1.0);
   vWorldPos = worldPos.xyz;
-  // Transform normal to world space. Normalize because the model matrix
-  // may contain non-uniform scale (though ours doesn't currently).
   vNormal = normalize(mat3(uModel) * aNormal);
   vTexCoord = aTexCoord;
   gl_Position = uViewProj * worldPos;
 }
 `;
 
-// Fragment shader — Phong lighting applied to the texture color.
 const fragmentShaderSource = `#version 300 es
 precision mediump float;
 
@@ -87,28 +76,21 @@ in vec3 vWorldPos;
 in vec3 vNormal;
 
 uniform sampler2D uTexture;
-uniform vec3 uLightPos;    // world-space light position
-uniform vec3 uCameraPos;   // world-space camera position
+uniform vec3 uLightPos;
+uniform vec3 uCameraPos;
 
 out vec4 fragColor;
 
 void main() {
   vec3 texColor = texture(uTexture, vTexCoord).rgb;
 
-  // Normalize the interpolated normal (interpolation can de-normalize it).
   vec3 N = normalize(vNormal);
-  vec3 L = normalize(uLightPos - vWorldPos);  // direction to light
-  vec3 V = normalize(uCameraPos - vWorldPos); // direction to camera
-  vec3 R = reflect(-L, N);                    // reflection of light around normal
+  vec3 L = normalize(uLightPos - vWorldPos);
+  vec3 V = normalize(uCameraPos - vWorldPos);
+  vec3 R = reflect(-L, N);
 
-  // Ambient — constant base light so back faces aren't pure black.
   float ambient = 0.15;
-
-  // Diffuse — Lambert's cosine law: max(dot(N, L), 0).
   float diffuse = max(dot(N, L), 0.0);
-
-  // Specular — Phong: pow(max(dot(R, V), 0), shininess).
-  // Higher shininess = tighter, shinier highlight.
   float specular = pow(max(dot(R, V), 0.0), 32.0);
 
   vec3 color = texColor * (ambient + diffuse) + vec3(1.0) * specular * 0.5;
@@ -116,80 +98,19 @@ void main() {
 }
 `;
 
-// ---------------------------------------------------------------------------
-// Compile a shader from source
-// ---------------------------------------------------------------------------
-
-function compileShader(type: GLenum, source: string): WebGLShader {
-  const shader = gl.createShader(type);
-  if (!shader) throw new Error("Failed to create shader");
-
-  gl.shaderSource(shader, source);
-  gl.compileShader(shader);
-
-  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-    const log = gl.getShaderInfoLog(shader);
-    gl.deleteShader(shader);
-    throw new Error(`Shader compile error:\n${log}`);
-  }
-  return shader;
-}
+const shader = new ShaderProgram(gl, vertexShaderSource, fragmentShaderSource);
 
 // ---------------------------------------------------------------------------
-// Link shaders into a program
+// Cube geometry — using the Mesh abstraction
 // ---------------------------------------------------------------------------
-
-function createProgram(
-  vertexSource: string,
-  fragmentSource: string
-): WebGLProgram {
-  const vs = compileShader(gl.VERTEX_SHADER, vertexSource);
-  const fs = compileShader(gl.FRAGMENT_SHADER, fragmentSource);
-
-  const program = gl.createProgram();
-  if (!program) throw new Error("Failed to create program");
-
-  gl.attachShader(program, vs);
-  gl.attachShader(program, fs);
-  gl.linkProgram(program);
-
-  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-    const log = gl.getProgramInfoLog(program);
-    gl.deleteProgram(program);
-    throw new Error(`Program link error:\n${log}`);
-  }
-
-  gl.deleteShader(vs);
-  gl.deleteShader(fs);
-
-  return program;
-}
-
-// ---------------------------------------------------------------------------
-// Create the shader program
-// ---------------------------------------------------------------------------
-
-const program = createProgram(vertexShaderSource, fragmentShaderSource);
-const uModelLoc = gl.getUniformLocation(program, "uModel");
-const uViewProjLoc = gl.getUniformLocation(program, "uViewProj");
-const uTextureLoc = gl.getUniformLocation(program, "uTexture");
-const uLightPosLoc = gl.getUniformLocation(program, "uLightPos");
-const uCameraPosLoc = gl.getUniformLocation(program, "uCameraPos");
-
-// ---------------------------------------------------------------------------
-// Vertex data — a cube with UVs and normals
-// ---------------------------------------------------------------------------
-
-// Each vertex: x, y, z, u, v, nx, ny, nz (8 floats = 32 bytes).
-// Normals point outward from each face.
 
 // Helper: generate 6 vertices (2 triangles) for one face.
+// Each vertex: pos(3) + uv(2) + normal(3) = 8 floats.
 function face(
-  positions: number[][],   // 4 corners in CCW order
+  positions: number[][],
   normal: number[],
-  uvs: number[][]          // 4 UV coords matching the corners
+  uvs: number[][]
 ): number[] {
-  // Two triangles: 0-1-2 and 0-2-3.
   const indices = [0, 1, 2, 0, 2, 3];
   const out: number[] = [];
   for (const i of indices) {
@@ -199,104 +120,46 @@ function face(
 }
 
 // prettier-ignore
-const vertices = new Float32Array([
-  // Front face (z = +0.5), normal [0, 0, 1]
-  ...face(
-    [[-0.5,-0.5, 0.5],[ 0.5,-0.5, 0.5],[ 0.5, 0.5, 0.5],[-0.5, 0.5, 0.5]],
-    [0, 0, 1],
-    [[0,0],[1,0],[1,1],[0,1]]
-  ),
-  // Back face (z = -0.5), normal [0, 0, -1]
-  ...face(
-    [[ 0.5,-0.5,-0.5],[-0.5,-0.5,-0.5],[-0.5, 0.5,-0.5],[ 0.5, 0.5,-0.5]],
-    [0, 0, -1],
-    [[0,0],[1,0],[1,1],[0,1]]
-  ),
-  // Top face (y = +0.5), normal [0, 1, 0]
-  ...face(
-    [[-0.5, 0.5, 0.5],[ 0.5, 0.5, 0.5],[ 0.5, 0.5,-0.5],[-0.5, 0.5,-0.5]],
-    [0, 1, 0],
-    [[0,0],[1,0],[1,1],[0,1]]
-  ),
-  // Bottom face (y = -0.5), normal [0, -1, 0]
-  ...face(
-    [[-0.5,-0.5,-0.5],[ 0.5,-0.5,-0.5],[ 0.5,-0.5, 0.5],[-0.5,-0.5, 0.5]],
-    [0, -1, 0],
-    [[0,0],[1,0],[1,1],[0,1]]
-  ),
-  // Right face (x = +0.5), normal [1, 0, 0]
-  ...face(
-    [[ 0.5,-0.5, 0.5],[ 0.5,-0.5,-0.5],[ 0.5, 0.5,-0.5],[ 0.5, 0.5, 0.5]],
-    [1, 0, 0],
-    [[0,0],[1,0],[1,1],[0,1]]
-  ),
-  // Left face (x = -0.5), normal [-1, 0, 0]
-  ...face(
-    [[-0.5,-0.5,-0.5],[-0.5,-0.5, 0.5],[-0.5, 0.5, 0.5],[-0.5, 0.5,-0.5]],
-    [-1, 0, 0],
-    [[0,0],[1,0],[1,1],[0,1]]
-  ),
+const cubeData = new Float32Array([
+  ...face([[-0.5,-0.5, 0.5],[ 0.5,-0.5, 0.5],[ 0.5, 0.5, 0.5],[-0.5, 0.5, 0.5]], [0,0,1], [[0,0],[1,0],[1,1],[0,1]]),
+  ...face([[ 0.5,-0.5,-0.5],[-0.5,-0.5,-0.5],[-0.5, 0.5,-0.5],[ 0.5, 0.5,-0.5]], [0,0,-1], [[0,0],[1,0],[1,1],[0,1]]),
+  ...face([[-0.5, 0.5, 0.5],[ 0.5, 0.5, 0.5],[ 0.5, 0.5,-0.5],[-0.5, 0.5,-0.5]], [0,1,0], [[0,0],[1,0],[1,1],[0,1]]),
+  ...face([[-0.5,-0.5,-0.5],[ 0.5,-0.5,-0.5],[ 0.5,-0.5, 0.5],[-0.5,-0.5, 0.5]], [0,-1,0], [[0,0],[1,0],[1,1],[0,1]]),
+  ...face([[ 0.5,-0.5, 0.5],[ 0.5,-0.5,-0.5],[ 0.5, 0.5,-0.5],[ 0.5, 0.5, 0.5]], [1,0,0], [[0,0],[1,0],[1,1],[0,1]]),
+  ...face([[-0.5,-0.5,-0.5],[-0.5,-0.5, 0.5],[-0.5, 0.5, 0.5],[-0.5, 0.5,-0.5]], [-1,0,0], [[0,0],[1,0],[1,1],[0,1]]),
+]);
+
+const cubeMesh = new Mesh(gl, cubeData, [
+  { location: 0, size: 3 }, // position
+  { location: 1, size: 2 }, // texcoord
+  { location: 2, size: 3 }, // normal
 ]);
 
 // ---------------------------------------------------------------------------
-// Upload vertex data to GPU
-// ---------------------------------------------------------------------------
-
-const vbo = gl.createBuffer();
-gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
-gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
-
-// ---------------------------------------------------------------------------
-// Vertex Array Object (VAO) — describe the memory layout
-// ---------------------------------------------------------------------------
-
-// 8 floats per vertex (3 pos + 2 uv + 3 normal) = 32 bytes stride.
-const vao = gl.createVertexArray();
-gl.bindVertexArray(vao);
-
-const STRIDE = 8 * Float32Array.BYTES_PER_ELEMENT; // 32 bytes
-
-// Attribute 0: position (vec3)
-gl.enableVertexAttribArray(0);
-gl.vertexAttribPointer(0, 3, gl.FLOAT, false, STRIDE, 0);
-
-// Attribute 1: texcoord (vec2) — offset 12
-gl.enableVertexAttribArray(1);
-gl.vertexAttribPointer(1, 2, gl.FLOAT, false, STRIDE, 3 * Float32Array.BYTES_PER_ELEMENT);
-
-// Attribute 2: normal (vec3) — offset 20
-gl.enableVertexAttribArray(2);
-gl.vertexAttribPointer(2, 3, gl.FLOAT, false, STRIDE, 5 * Float32Array.BYTES_PER_ELEMENT);
-
-gl.bindVertexArray(null);
-
-// ---------------------------------------------------------------------------
-// Generate a checkerboard texture procedurally
+// Checkerboard texture
 // ---------------------------------------------------------------------------
 
 const TEX_SIZE = 8;
-const texData = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
-
+const texPixels = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
 for (let row = 0; row < TEX_SIZE; row++) {
   for (let col = 0; col < TEX_SIZE; col++) {
     const i = (row * TEX_SIZE + col) * 4;
-    const isWhite = (row + col) % 2 === 0;
-    const v = isWhite ? 255 : 60;
-    texData[i] = v;
-    texData[i + 1] = v;
-    texData[i + 2] = v;
-    texData[i + 3] = 255;
+    const v = (row + col) % 2 === 0 ? 255 : 60;
+    texPixels[i] = v;
+    texPixels[i + 1] = v;
+    texPixels[i + 2] = v;
+    texPixels[i + 3] = 255;
   }
 }
 
-const texture = gl.createTexture();
-gl.bindTexture(gl.TEXTURE_2D, texture);
-gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, TEX_SIZE, TEX_SIZE, 0, gl.RGBA, gl.UNSIGNED_BYTE, texData);
-gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+const checkerboard = new Texture(gl, {
+  width: TEX_SIZE,
+  height: TEX_SIZE,
+  data: texPixels,
+});
 
 // ---------------------------------------------------------------------------
-// Enable depth testing
+// GL state
 // ---------------------------------------------------------------------------
 
 gl.enable(gl.DEPTH_TEST);
@@ -318,7 +181,7 @@ function resizeCanvas() {
 }
 
 // ---------------------------------------------------------------------------
-// Orbit camera state
+// Orbit camera
 // ---------------------------------------------------------------------------
 
 let camTheta = 0.5;
@@ -339,7 +202,7 @@ function cameraPosition(): vec3 {
 }
 
 // ---------------------------------------------------------------------------
-// Mouse controls — orbit on drag, zoom on scroll
+// Mouse controls
 // ---------------------------------------------------------------------------
 
 let isDragging = false;
@@ -354,27 +217,21 @@ canvas.addEventListener("mousedown", (e) => {
   }
 });
 
-window.addEventListener("mouseup", () => {
-  isDragging = false;
-});
+window.addEventListener("mouseup", () => { isDragging = false; });
 
 window.addEventListener("mousemove", (e) => {
   if (!isDragging) return;
-
   const dx = e.clientX - lastMouseX;
   const dy = e.clientY - lastMouseY;
   lastMouseX = e.clientX;
   lastMouseY = e.clientY;
-
   camTheta -= dx * 0.01;
-  camPhi += dy * 0.01;
-  camPhi = Math.max(CAM_PHI_MIN, Math.min(CAM_PHI_MAX, camPhi));
+  camPhi = Math.max(CAM_PHI_MIN, Math.min(CAM_PHI_MAX, camPhi + dy * 0.01));
 });
 
 canvas.addEventListener("wheel", (e) => {
   e.preventDefault();
-  camRadius += e.deltaY * 0.01;
-  camRadius = Math.max(CAM_RADIUS_MIN, Math.min(CAM_RADIUS_MAX, camRadius));
+  camRadius = Math.max(CAM_RADIUS_MIN, Math.min(CAM_RADIUS_MAX, camRadius + e.deltaY * 0.01));
 }, { passive: false });
 
 // ---------------------------------------------------------------------------
@@ -396,43 +253,30 @@ function frame(time: DOMHighResTimeStamp) {
   gl.clearColor(0.08, 0.08, 0.12, 1.0);
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
-  // --- Model matrix: rotate the cube over time ---
   const angle = time * 0.001;
   mat4.identity(model);
   mat4.rotateY(model, model, angle);
   mat4.rotateX(model, model, angle * 0.7);
 
-  // --- View matrix ---
   const eye = cameraPosition();
   mat4.lookAt(view, eye, [0, 0, 0], [0, 1, 0]);
 
-  // --- Projection matrix ---
   const aspect = canvas.width / canvas.height;
   mat4.perspective(proj, Math.PI / 4, aspect, 0.1, 100.0);
-
-  // --- ViewProj = Projection × View (Model sent separately for lighting) ---
   mat4.multiply(viewProj, proj, view);
 
-  // --- Draw ---
-  gl.useProgram(program);
-  gl.uniformMatrix4fv(uModelLoc, false, model);
-  gl.uniformMatrix4fv(uViewProjLoc, false, viewProj);
+  shader.use();
+  shader.setMat4("uModel", model);
+  shader.setMat4("uViewProj", viewProj);
 
-  // Light orbits slowly so you can see the shading change.
   const lightAngle = time * 0.0005;
-  gl.uniform3f(uLightPosLoc,
-    3.0 * Math.cos(lightAngle),
-    2.0,
-    3.0 * Math.sin(lightAngle)
-  );
-  gl.uniform3fv(uCameraPosLoc, eye);
+  shader.setVec3("uLightPos", 3.0 * Math.cos(lightAngle), 2.0, 3.0 * Math.sin(lightAngle));
+  shader.setVec3v("uCameraPos", eye);
 
-  gl.activeTexture(gl.TEXTURE0);
-  gl.bindTexture(gl.TEXTURE_2D, texture);
-  gl.uniform1i(uTextureLoc, 0);
+  checkerboard.bind(0);
+  shader.setInt("uTexture", 0);
 
-  gl.bindVertexArray(vao);
-  gl.drawArrays(gl.TRIANGLES, 0, 36);
+  cubeMesh.draw();
 
   requestAnimationFrame(frame);
 }
