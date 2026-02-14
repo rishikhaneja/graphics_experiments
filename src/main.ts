@@ -12,26 +12,23 @@
 //   [x] Step 10 — Shadow Mapping
 //   [x] Step 11 — Multiple Objects / Scene Graph
 //   [x] Step 12 — Deferred Rendering
-//   [ ] Step 13 — Post-Processing (bloom, tone mapping)
+//   [x] Step 13 — Post-Processing (bloom, tone mapping)
 //   [ ] Step 14 — Skeletal Animation
 
-// Step 12: Deferred Rendering
+// Step 13: Post-Processing — bloom and tone mapping
 //
-// The forward renderer (Step 11) computed lighting per-fragment for every
-// object drawn. Deferred rendering splits this into two phases:
+// Building on the deferred pipeline (Step 12), we add a post-processing
+// chain after the lighting pass:
 //
-//   1. G-Buffer pass — render ALL geometry into 3 textures via MRT:
-//        - Position  (RGBA16F) — world-space XYZ + occupancy flag
-//        - Normal    (RGBA16F) — world-space normal (with normal mapping)
-//        - Albedo    (RGBA8)   — texture color
-//      No lighting math here — just material + geometry storage.
+//   1. Lighting pass now renders to an HDR framebuffer (RGBA16F) with
+//      boosted specular (values > 1.0) so bright spots feed the bloom.
+//   2. Bloom extraction — threshold pass isolates bright pixels (> 1.0).
+//   3. Gaussian blur — separable horizontal + vertical, ping-ponged 5×
+//      at half resolution for a wide, soft glow.
+//   4. Composite — combines HDR scene + blurred bloom, then applies
+//      ACES filmic tone mapping and gamma correction.
 //
-//   2. Lighting pass — a fullscreen triangle reads the G-Buffer textures
-//      and shadow map, computes Phong shading in screen space. This runs
-//      once regardless of object count.
-//
-// The shadow pass remains unchanged (depth-only from light's POV).
-// The WebGPU backend stays forward-rendered for now.
+// The WebGPU backend stays forward-rendered (no post-processing yet).
 
 import { mat4, vec3 } from "gl-matrix";
 import type { Renderer, MeshHandle, TextureHandle, DrawCall } from "./engine";
