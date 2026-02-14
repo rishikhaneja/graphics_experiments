@@ -2,28 +2,30 @@
 //   [x] Step 0 — Project Scaffold
 //   [x] Step 1 — Hello Triangle
 //   [x] Step 2 — Transformations (rotating 3D cube)
-//   [ ] Step 3 — Interactive Camera
+//   [x] Step 3 — Interactive Camera
 //   [ ] Step 4 — Textures
 //   [ ] Step 5 — Lighting (Phong)
 //   [ ] Step 6 — Abstraction Layer
 //   [ ] Step 7 — WebGPU Backend
 
-// Step 2: Rotating Cube with MVP Transforms
+// Step 3: Interactive Camera
 //
-// Step 1 drew a 2D triangle directly in clip space — no math involved.
-// Now we introduce the **model-view-projection (MVP) pipeline**, the core of
-// all 3D rendering. Every vertex goes through three transforms:
+// Step 2 had a fixed camera at [0, 0, 3]. Now we let the user orbit around the
+// cube with the mouse. The camera sits on a sphere centered at the origin:
 //
-//   Model      — places the object in the world (rotation, translation, scale)
-//   View       — moves the world so the camera is at the origin looking down -Z
-//   Projection — squishes 3D into 2D with perspective (distant things look smaller)
+//   x = r * sin(phi) * sin(theta)
+//   y = r * cos(phi)
+//   z = r * sin(phi) * cos(theta)
 //
-// On the GPU: gl_Position = Projection * View * Model * vec4(position, 1.0)
+// where theta = horizontal angle, phi = vertical angle, r = distance.
 //
-// We also enable **depth testing** — without it, triangles drawn later would
-// paint over closer triangles, and the cube would look inside-out.
+// Controls:
+//   - Left-click + drag → orbit (rotate theta/phi)
+//   - Scroll wheel → zoom (change r)
+//
+// The cube still auto-rotates so there's something to look at from every angle.
 
-import { mat4 } from "gl-matrix";
+import { mat4, vec3 } from "gl-matrix";
 
 // ---------------------------------------------------------------------------
 // Canvas + WebGL2 context
@@ -43,29 +45,21 @@ const gl: WebGL2RenderingContext = maybeGl;
 // Shader source code
 // ---------------------------------------------------------------------------
 
-// Vertex shader — now takes a 3D position and a uniform MVP matrix.
-//
-// `uniform` variables are set once per draw call from the CPU. They don't
-// change per-vertex (unlike `in` attributes). We use a uniform for the MVP
-// matrix because every vertex of the cube shares the same transform.
 const vertexShaderSource = `#version 300 es
 
-layout(location = 0) in vec3 aPosition;   // 3D now (was vec2)
+layout(location = 0) in vec3 aPosition;
 layout(location = 1) in vec3 aColor;
 
-uniform mat4 uMVP;   // model-view-projection matrix, set from CPU each frame
+uniform mat4 uMVP;
 
 out vec3 vColor;
 
 void main() {
   vColor = aColor;
-  // Multiply position by MVP to go from local object space → clip space.
-  // vec4(..., 1.0): w=1 marks this as a position (not a direction vector).
   gl_Position = uMVP * vec4(aPosition, 1.0);
 }
 `;
 
-// Fragment shader — unchanged from Step 1. Still receives interpolated color.
 const fragmentShaderSource = `#version 300 es
 precision mediump float;
 
@@ -131,21 +125,11 @@ function createProgram(
 // ---------------------------------------------------------------------------
 
 const program = createProgram(vertexShaderSource, fragmentShaderSource);
-
-// Look up the uniform location for our MVP matrix. We'll upload a new matrix
-// every frame as the cube rotates.
 const uMVPLoc = gl.getUniformLocation(program, "uMVP");
 
 // ---------------------------------------------------------------------------
 // Vertex data — a cube with 6 colored faces
 // ---------------------------------------------------------------------------
-
-// A cube has 8 corners, but we can't share vertices across faces when each
-// face has a different color. Each face is 2 triangles × 3 vertices = 6 verts,
-// and 6 faces × 6 = 36 vertices total.
-//
-// Each vertex: x, y, z, r, g, b (6 floats = 24 bytes).
-// The cube spans from -0.5 to +0.5 on each axis (unit cube centered at origin).
 
 // prettier-ignore
 const vertices = new Float32Array([
@@ -210,33 +194,16 @@ gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
 // Vertex Array Object (VAO) — describe the memory layout
 // ---------------------------------------------------------------------------
 
-// Now 6 floats per vertex (3 pos + 3 color) = 24 bytes stride.
 const vao = gl.createVertexArray();
 gl.bindVertexArray(vao);
 
-const STRIDE = 6 * Float32Array.BYTES_PER_ELEMENT; // 24 bytes
+const STRIDE = 6 * Float32Array.BYTES_PER_ELEMENT;
 
-// Attribute 0: position (vec3) — starts at byte offset 0.
 gl.enableVertexAttribArray(0);
-gl.vertexAttribPointer(
-  0,            // location
-  3,            // 3 components (vec3, was vec2 in Step 1)
-  gl.FLOAT,
-  false,
-  STRIDE,
-  0
-);
+gl.vertexAttribPointer(0, 3, gl.FLOAT, false, STRIDE, 0);
 
-// Attribute 1: color (vec3) — starts at byte offset 12 (after 3 position floats).
 gl.enableVertexAttribArray(1);
-gl.vertexAttribPointer(
-  1,            // location
-  3,            // 3 components (vec3)
-  gl.FLOAT,
-  false,
-  STRIDE,
-  3 * Float32Array.BYTES_PER_ELEMENT // offset = 12 bytes
-);
+gl.vertexAttribPointer(1, 3, gl.FLOAT, false, STRIDE, 3 * Float32Array.BYTES_PER_ELEMENT);
 
 gl.bindVertexArray(null);
 
@@ -244,9 +211,6 @@ gl.bindVertexArray(null);
 // Enable depth testing
 // ---------------------------------------------------------------------------
 
-// Without depth testing, triangles are painted in the order they appear in the
-// buffer. A back face drawn after a front face would overwrite it. Depth testing
-// keeps a per-pixel depth value and only lets closer fragments through.
 gl.enable(gl.DEPTH_TEST);
 
 // ---------------------------------------------------------------------------
@@ -266,10 +230,75 @@ function resizeCanvas() {
 }
 
 // ---------------------------------------------------------------------------
+// Orbit camera state
+// ---------------------------------------------------------------------------
+
+// Spherical coordinates: theta (horizontal), phi (vertical), radius (distance).
+// phi is clamped to avoid flipping at the poles.
+let camTheta = 0.5;   // horizontal angle (radians)
+let camPhi = 1.0;     // vertical angle — 0 = top pole, PI = bottom pole
+let camRadius = 3.0;  // distance from origin
+
+const CAM_PHI_MIN = 0.1;
+const CAM_PHI_MAX = Math.PI - 0.1;
+const CAM_RADIUS_MIN = 1.0;
+const CAM_RADIUS_MAX = 20.0;
+
+// Convert spherical → Cartesian for use in lookAt.
+function cameraPosition(): vec3 {
+  return vec3.fromValues(
+    camRadius * Math.sin(camPhi) * Math.sin(camTheta),
+    camRadius * Math.cos(camPhi),
+    camRadius * Math.sin(camPhi) * Math.cos(camTheta)
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Mouse controls — orbit on drag, zoom on scroll
+// ---------------------------------------------------------------------------
+
+let isDragging = false;
+let lastMouseX = 0;
+let lastMouseY = 0;
+
+canvas.addEventListener("mousedown", (e) => {
+  if (e.button === 0) {
+    isDragging = true;
+    lastMouseX = e.clientX;
+    lastMouseY = e.clientY;
+  }
+});
+
+window.addEventListener("mouseup", () => {
+  isDragging = false;
+});
+
+window.addEventListener("mousemove", (e) => {
+  if (!isDragging) return;
+
+  const dx = e.clientX - lastMouseX;
+  const dy = e.clientY - lastMouseY;
+  lastMouseX = e.clientX;
+  lastMouseY = e.clientY;
+
+  // Scale mouse pixels to radians. 300px ≈ 1 radian feels natural.
+  camTheta -= dx * 0.01;
+  camPhi += dy * 0.01;
+
+  // Clamp phi so the camera can't flip over the poles.
+  camPhi = Math.max(CAM_PHI_MIN, Math.min(CAM_PHI_MAX, camPhi));
+});
+
+canvas.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  camRadius += e.deltaY * 0.01;
+  camRadius = Math.max(CAM_RADIUS_MIN, Math.min(CAM_RADIUS_MAX, camRadius));
+}, { passive: false });
+
+// ---------------------------------------------------------------------------
 // MVP matrices — preallocate once, recompute each frame
 // ---------------------------------------------------------------------------
 
-// We allocate these once to avoid GC pressure in the render loop.
 const model = mat4.create();
 const view = mat4.create();
 const proj = mat4.create();
@@ -286,35 +315,29 @@ function frame(time: DOMHighResTimeStamp) {
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
   // --- Model matrix: rotate the cube over time ---
-  // time is in milliseconds. Multiply by 0.001 to get a smooth ~1 radian/sec.
   const angle = time * 0.001;
   mat4.identity(model);
-  mat4.rotateY(model, model, angle);        // primary rotation around Y
-  mat4.rotateX(model, model, angle * 0.7);  // slower tilt around X for tumble
+  mat4.rotateY(model, model, angle);
+  mat4.rotateX(model, model, angle * 0.7);
 
-  // --- View matrix: camera positioned at [0, 0, 3] looking at the origin ---
-  mat4.lookAt(view, [0, 0, 3], [0, 0, 0], [0, 1, 0]);
+  // --- View matrix: camera on an orbit sphere ---
+  const eye = cameraPosition();
+  mat4.lookAt(view, eye, [0, 0, 0], [0, 1, 0]);
 
-  // --- Projection matrix: perspective with 45° FOV ---
-  // Recalculate aspect ratio every frame so resizing doesn't stretch the cube.
+  // --- Projection matrix ---
   const aspect = canvas.width / canvas.height;
   mat4.perspective(proj, Math.PI / 4, aspect, 0.1, 100.0);
 
   // --- Combine: MVP = Projection × View × Model ---
-  mat4.multiply(mvp, proj, view);   // mvp = proj * view
-  mat4.multiply(mvp, mvp, model);   // mvp = (proj * view) * model
+  mat4.multiply(mvp, proj, view);
+  mat4.multiply(mvp, mvp, model);
 
   // --- Draw ---
   gl.useProgram(program);
-
-  // Upload the MVP matrix to the GPU. uniformMatrix4fv takes a Float32Array
-  // (or array-like). gl-matrix mat4 is already a Float32Array.
-  // The `false` parameter means "don't transpose" — gl-matrix uses column-major
-  // order, which is what OpenGL/WebGL expects.
   gl.uniformMatrix4fv(uMVPLoc, false, mvp);
 
   gl.bindVertexArray(vao);
-  gl.drawArrays(gl.TRIANGLES, 0, 36); // 36 vertices = 12 triangles = 6 faces
+  gl.drawArrays(gl.TRIANGLES, 0, 36);
 
   requestAnimationFrame(frame);
 }
