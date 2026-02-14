@@ -48,5 +48,6 @@ export interface DrawUniforms {
   viewProj: mat4;
   lightPos: vec3;
   cameraPos: vec3;
-  normalMap?: TextureHandle; // optional normal map for Step 9
+  normalMap?: TextureHandle;
+  lightViewProj?: mat4; // light-space VP matrix for shadow mapping
 }

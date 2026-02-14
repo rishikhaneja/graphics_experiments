@@ -9,29 +9,34 @@
 //   [x] Step 7 — WebGPU Backend
 //   [x] Step 8 — OBJ Mesh Loading
 //   [x] Step 9 — Normal Mapping
-//   [ ] Step 10 — Shadow Mapping
+//   [x] Step 10 — Shadow Mapping
 //   [ ] Step 11 — Multiple Objects / Scene Graph
 //   [ ] Step 12 — Deferred Rendering
 //   [ ] Step 13 — Post-Processing (bloom, tone mapping)
 //   [ ] Step 14 — Skeletal Animation
 
-// Step 9: Normal Mapping
+// Step 10: Shadow Mapping
 //
-// Phong lighting with geometric normals makes curved surfaces look faceted.
-// Normal mapping adds per-pixel detail by storing perturbed normals in a
-// texture, letting a low-poly mesh look high-detail.
+// Shadows ground the scene — without them objects look like they float.
+// We use **shadow mapping**, the most common real-time shadow technique:
 //
-// How it works:
-//   1. We compute per-vertex **tangent** vectors from the mesh's UV mapping
-//      (src/tangents.ts). Together with the vertex normal and the cross-product
-//      bitangent, this forms a **TBN matrix** at each vertex.
-//   2. The normal map stores tangent-space normals as RGB colors:
-//      (0,0,1) → flat surface, deviations add bumps/grooves.
-//   3. The fragment shader samples the normal map, remaps [0,1]→[-1,1],
-//      and transforms the result to world space via the interpolated TBN.
+//   1. **Shadow pass** — render the scene from the light's point of view into
+//      a depth-only framebuffer (the "shadow map"). This records how far away
+//      each surface is from the light.
+//   2. **Main pass** — for every fragment, project it into light space and
+//      compare its depth to the shadow map. If the fragment is further from
+//      the light than the recorded depth, it's in shadow.
 //
-// We generate a procedural "brick" normal map to make the checkerboard
-// texture look like raised tiles with beveled edges.
+// Challenges solved here:
+//   - **Shadow acne** — a small depth bias prevents surfaces from shadowing
+//     themselves due to floating-point precision issues.
+//   - **Peter panning** — we cull front faces in the shadow pass so the bias
+//     doesn't push shadows away from the caster.
+//   - **Soft edges** — PCF (percentage-closer filtering) averages 9 shadow
+//     samples in a 3×3 kernel for smoother shadow boundaries.
+//
+// The light uses an orthographic projection (directional light), which gives
+// uniform shadow quality across the scene.
 
 import { mat4, vec3 } from "gl-matrix";
 import type { Renderer, MeshHandle, TextureHandle } from "./engine";
@@ -41,7 +46,7 @@ import { parseObj } from "./objParser";
 import { computeTangents } from "./tangents";
 
 // ---------------------------------------------------------------------------
-// Initialize renderer — try WebGPU first, fall back to WebGL2
+// Initialize renderer
 // ---------------------------------------------------------------------------
 
 const canvas = document.getElementById("canvas") as HTMLCanvasElement;
@@ -74,7 +79,7 @@ async function loadObj(url: string): Promise<Float32Array> {
 }
 
 // ---------------------------------------------------------------------------
-// Vertex layout — now includes tangent (location 3)
+// Vertex layout — pos + uv + normal + tangent
 // ---------------------------------------------------------------------------
 
 const VERTEX_LAYOUT = [
@@ -88,8 +93,9 @@ const VERTEX_LAYOUT = [
 // Procedural textures
 // ---------------------------------------------------------------------------
 
-// Checkerboard albedo
 const TEX_SIZE = 64;
+
+// Checkerboard albedo
 const TEX_PIXELS = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
 for (let row = 0; row < TEX_SIZE; row++) {
   for (let col = 0; col < TEX_SIZE; col++) {
@@ -103,33 +109,23 @@ for (let row = 0; row < TEX_SIZE; row++) {
   }
 }
 
-// Normal map — raised tiles with beveled edges.
-// Each tile is tileSize×tileSize pixels. The bevel creates edges that catch light.
-// Tangent-space normal: (0,0,1) = flat, X/Y deviations = tilt.
+// Normal map — beveled tile edges
 const NORMAL_MAP = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
 {
   const tileSize = 8;
-  const bevel = 2; // pixels of bevel on each side
+  const bevel = 2;
   for (let row = 0; row < TEX_SIZE; row++) {
     for (let col = 0; col < TEX_SIZE; col++) {
       const i = (row * TEX_SIZE + col) * 4;
-      const tx = col % tileSize; // position within tile
+      const tx = col % tileSize;
       const ty = row % tileSize;
-
-      // Default: flat normal (tangent-space up)
       let nx = 0, ny = 0, nz = 1;
-
-      // Bevel edges: tilt normal outward
       if (tx < bevel) nx = -0.7;
       else if (tx >= tileSize - bevel) nx = 0.7;
-      if (ty < bevel) ny = 0.7;  // flip Y because texture Y is top-down
+      if (ty < bevel) ny = 0.7;
       else if (ty >= tileSize - bevel) ny = -0.7;
-
-      // Normalize
       const len = Math.sqrt(nx * nx + ny * ny + nz * nz);
       nx /= len; ny /= len; nz /= len;
-
-      // Map [-1,1] → [0,255]
       NORMAL_MAP[i]     = Math.round((nx * 0.5 + 0.5) * 255);
       NORMAL_MAP[i + 1] = Math.round((ny * 0.5 + 0.5) * 255);
       NORMAL_MAP[i + 2] = Math.round((nz * 0.5 + 0.5) * 255);
@@ -202,7 +198,6 @@ async function main() {
     loadObj("models/torus.obj"),
   ]);
 
-  // Compute tangents and create mesh with the extended vertex layout
   const meshData = computeTangents(rawMeshData);
   const mesh: MeshHandle = renderer.createMesh(meshData, VERTEX_LAYOUT);
 
@@ -224,6 +219,11 @@ async function main() {
   const viewProj = mat4.create();
   const lightPos = vec3.create();
 
+  // Light-space matrices for shadow mapping
+  const lightView = mat4.create();
+  const lightProj = mat4.create();
+  const lightViewProj = mat4.create();
+
   function frame(time: DOMHighResTimeStamp) {
     renderer.resize();
     renderer.beginFrame();
@@ -243,12 +243,18 @@ async function main() {
     const lightAngle = time * 0.0005;
     vec3.set(lightPos, 3.0 * Math.cos(lightAngle), 2.0, 3.0 * Math.sin(lightAngle));
 
+    // Compute light VP (orthographic, looking at origin from light position)
+    mat4.lookAt(lightView, lightPos, [0, 0, 0], [0, 1, 0]);
+    mat4.ortho(lightProj, -3, 3, -3, 3, 0.1, 10.0);
+    mat4.multiply(lightViewProj, lightProj, lightView);
+
     renderer.draw(mesh, texture, {
       model,
       viewProj,
       lightPos,
       cameraPos: eye,
       normalMap,
+      lightViewProj,
     });
 
     requestAnimationFrame(frame);
