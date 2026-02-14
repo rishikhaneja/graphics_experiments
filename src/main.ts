@@ -7,6 +7,13 @@
 //   [x] Step 5 — Lighting (Phong)
 //   [x] Step 6 — Abstraction Layer
 //   [x] Step 7 — WebGPU Backend
+//   [ ] Step 8 — OBJ Mesh Loading
+//   [ ] Step 9 — Normal Mapping
+//   [ ] Step 10 — Shadow Mapping
+//   [ ] Step 11 — Multiple Objects / Scene Graph
+//   [ ] Step 12 — Deferred Rendering
+//   [ ] Step 13 — Post-Processing (bloom, tone mapping)
+//   [ ] Step 14 — Skeletal Animation
 
 // Step 7: WebGPU Backend
 //
