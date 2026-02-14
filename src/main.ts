@@ -6,106 +6,56 @@
 //   [x] Step 4 — Textures
 //   [x] Step 5 — Lighting (Phong)
 //   [x] Step 6 — Abstraction Layer
-//   [ ] Step 7 — WebGPU Backend
+//   [x] Step 7 — WebGPU Backend
 
-// Step 6: Abstraction Layer
+// Step 7: WebGPU Backend
 //
-// Steps 1–5 built everything in one flat file with raw WebGL calls. Now we
-// extract the repeating patterns into reusable classes:
+// Step 6 extracted reusable abstractions, but they were still WebGL2-specific.
+// Now we introduce a **Renderer interface** and two implementations:
 //
-//   - **ShaderProgram** — compiles/links GLSL, caches uniform locations,
-//     provides typed setters (setMat4, setVec3, etc.).
-//   - **Mesh** — takes a Float32Array and a vertex attribute layout, creates
-//     the VBO + VAO automatically. Computes stride and offsets for you.
-//   - **Texture** — wraps texture creation, parameter setup, and binding.
+//   - **WebGL2Renderer** — wraps the WebGL2 code from Steps 1–6.
+//   - **WebGPURenderer** — a new backend using the WebGPU API with WGSL shaders.
 //
-// The rendering logic in main.ts is now much shorter and focuses on the
-// scene description (what to draw) rather than GPU plumbing (how to draw).
+// At startup we try WebGPU first (it's the future of web graphics), and fall
+// back to WebGL2 if it's not available. The main loop is identical either way —
+// it just calls renderer.beginFrame(), renderer.draw(), etc.
 //
-// These abstractions are deliberately thin — just enough to remove boilerplate,
-// not so much that they hide what WebGL is doing.
+// Key differences in WebGPU:
+//   - Shaders are written in **WGSL** instead of GLSL.
+//   - State is baked into a **GPURenderPipeline** (no mutable GL state machine).
+//   - Uniforms/textures are passed via **bind groups** (like Vulkan descriptors).
+//   - Commands are recorded into a **GPUCommandEncoder**, then submitted as a batch.
+//   - Initialization is **async** (requesting adapter and device returns Promises).
 
 import { mat4, vec3 } from "gl-matrix";
-import { ShaderProgram, Mesh, Texture } from "./engine";
+import type { Renderer, MeshHandle, TextureHandle } from "./engine";
+import { WebGPURenderer } from "./engine";
+import { WebGL2Renderer } from "./engine";
 
 // ---------------------------------------------------------------------------
-// Canvas + WebGL2 context
+// Initialize renderer — try WebGPU first, fall back to WebGL2
 // ---------------------------------------------------------------------------
 
 const canvas = document.getElementById("canvas") as HTMLCanvasElement;
 
-const maybeGl = canvas.getContext("webgl2");
-if (!maybeGl) {
-  document.body.innerHTML =
-    '<h1 style="color:white;padding:2rem">WebGL2 is not supported in this browser.</h1>';
-  throw new Error("WebGL2 not supported");
+async function createRenderer(): Promise<Renderer & { aspect: number }> {
+  if (navigator.gpu) {
+    try {
+      const r = await WebGPURenderer.create(canvas);
+      console.log("Using WebGPU backend");
+      return r;
+    } catch (e) {
+      console.warn("WebGPU init failed, falling back to WebGL2:", e);
+    }
+  }
+  console.log("Using WebGL2 backend");
+  return new WebGL2Renderer(canvas);
 }
-const gl: WebGL2RenderingContext = maybeGl;
 
 // ---------------------------------------------------------------------------
-// Shaders (source is still inline — no build-time magic)
+// Cube geometry data — shared between both backends
 // ---------------------------------------------------------------------------
 
-const vertexShaderSource = `#version 300 es
-
-layout(location = 0) in vec3 aPosition;
-layout(location = 1) in vec2 aTexCoord;
-layout(location = 2) in vec3 aNormal;
-
-uniform mat4 uModel;
-uniform mat4 uViewProj;
-
-out vec2 vTexCoord;
-out vec3 vWorldPos;
-out vec3 vNormal;
-
-void main() {
-  vec4 worldPos = uModel * vec4(aPosition, 1.0);
-  vWorldPos = worldPos.xyz;
-  vNormal = normalize(mat3(uModel) * aNormal);
-  vTexCoord = aTexCoord;
-  gl_Position = uViewProj * worldPos;
-}
-`;
-
-const fragmentShaderSource = `#version 300 es
-precision mediump float;
-
-in vec2 vTexCoord;
-in vec3 vWorldPos;
-in vec3 vNormal;
-
-uniform sampler2D uTexture;
-uniform vec3 uLightPos;
-uniform vec3 uCameraPos;
-
-out vec4 fragColor;
-
-void main() {
-  vec3 texColor = texture(uTexture, vTexCoord).rgb;
-
-  vec3 N = normalize(vNormal);
-  vec3 L = normalize(uLightPos - vWorldPos);
-  vec3 V = normalize(uCameraPos - vWorldPos);
-  vec3 R = reflect(-L, N);
-
-  float ambient = 0.15;
-  float diffuse = max(dot(N, L), 0.0);
-  float specular = pow(max(dot(R, V), 0.0), 32.0);
-
-  vec3 color = texColor * (ambient + diffuse) + vec3(1.0) * specular * 0.5;
-  fragColor = vec4(color, 1.0);
-}
-`;
-
-const shader = new ShaderProgram(gl, vertexShaderSource, fragmentShaderSource);
-
-// ---------------------------------------------------------------------------
-// Cube geometry — using the Mesh abstraction
-// ---------------------------------------------------------------------------
-
-// Helper: generate 6 vertices (2 triangles) for one face.
-// Each vertex: pos(3) + uv(2) + normal(3) = 8 floats.
 function face(
   positions: number[][],
   normal: number[],
@@ -120,7 +70,7 @@ function face(
 }
 
 // prettier-ignore
-const cubeData = new Float32Array([
+const CUBE_DATA = new Float32Array([
   ...face([[-0.5,-0.5, 0.5],[ 0.5,-0.5, 0.5],[ 0.5, 0.5, 0.5],[-0.5, 0.5, 0.5]], [0,0,1], [[0,0],[1,0],[1,1],[0,1]]),
   ...face([[ 0.5,-0.5,-0.5],[-0.5,-0.5,-0.5],[-0.5, 0.5,-0.5],[ 0.5, 0.5,-0.5]], [0,0,-1], [[0,0],[1,0],[1,1],[0,1]]),
   ...face([[-0.5, 0.5, 0.5],[ 0.5, 0.5, 0.5],[ 0.5, 0.5,-0.5],[-0.5, 0.5,-0.5]], [0,1,0], [[0,0],[1,0],[1,1],[0,1]]),
@@ -129,54 +79,23 @@ const cubeData = new Float32Array([
   ...face([[-0.5,-0.5,-0.5],[-0.5,-0.5, 0.5],[-0.5, 0.5, 0.5],[-0.5, 0.5,-0.5]], [-1,0,0], [[0,0],[1,0],[1,1],[0,1]]),
 ]);
 
-const cubeMesh = new Mesh(gl, cubeData, [
+const CUBE_LAYOUT = [
   { location: 0, size: 3 }, // position
   { location: 1, size: 2 }, // texcoord
   { location: 2, size: 3 }, // normal
-]);
+];
 
-// ---------------------------------------------------------------------------
-// Checkerboard texture
-// ---------------------------------------------------------------------------
-
+// Checkerboard texture pixels.
 const TEX_SIZE = 8;
-const texPixels = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
+const TEX_PIXELS = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
 for (let row = 0; row < TEX_SIZE; row++) {
   for (let col = 0; col < TEX_SIZE; col++) {
     const i = (row * TEX_SIZE + col) * 4;
     const v = (row + col) % 2 === 0 ? 255 : 60;
-    texPixels[i] = v;
-    texPixels[i + 1] = v;
-    texPixels[i + 2] = v;
-    texPixels[i + 3] = 255;
-  }
-}
-
-const checkerboard = new Texture(gl, {
-  width: TEX_SIZE,
-  height: TEX_SIZE,
-  data: texPixels,
-});
-
-// ---------------------------------------------------------------------------
-// GL state
-// ---------------------------------------------------------------------------
-
-gl.enable(gl.DEPTH_TEST);
-
-// ---------------------------------------------------------------------------
-// Canvas resizing
-// ---------------------------------------------------------------------------
-
-function resizeCanvas() {
-  const dpr = window.devicePixelRatio || 1;
-  const width = Math.floor(canvas.clientWidth * dpr);
-  const height = Math.floor(canvas.clientHeight * dpr);
-
-  if (canvas.width !== width || canvas.height !== height) {
-    canvas.width = width;
-    canvas.height = height;
-    gl.viewport(0, 0, width, height);
+    TEX_PIXELS[i] = v;
+    TEX_PIXELS[i + 1] = v;
+    TEX_PIXELS[i + 2] = v;
+    TEX_PIXELS[i + 3] = 255;
   }
 }
 
@@ -235,50 +154,53 @@ canvas.addEventListener("wheel", (e) => {
 }, { passive: false });
 
 // ---------------------------------------------------------------------------
-// Matrices
+// Main — async because WebGPU init is async
 // ---------------------------------------------------------------------------
 
-const model = mat4.create();
-const view = mat4.create();
-const proj = mat4.create();
-const viewProj = mat4.create();
+async function main() {
+  const renderer = await createRenderer();
 
-// ---------------------------------------------------------------------------
-// Render loop
-// ---------------------------------------------------------------------------
+  const mesh: MeshHandle = renderer.createMesh(CUBE_DATA, CUBE_LAYOUT);
+  const texture: TextureHandle = renderer.createTexture({
+    width: TEX_SIZE,
+    height: TEX_SIZE,
+    data: TEX_PIXELS,
+  });
 
-function frame(time: DOMHighResTimeStamp) {
-  resizeCanvas();
+  const model = mat4.create();
+  const view = mat4.create();
+  const proj = mat4.create();
+  const viewProj = mat4.create();
+  const lightPos = vec3.create();
 
-  gl.clearColor(0.08, 0.08, 0.12, 1.0);
-  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  function frame(time: DOMHighResTimeStamp) {
+    renderer.resize();
+    renderer.beginFrame();
 
-  const angle = time * 0.001;
-  mat4.identity(model);
-  mat4.rotateY(model, model, angle);
-  mat4.rotateX(model, model, angle * 0.7);
+    const angle = time * 0.001;
+    mat4.identity(model);
+    mat4.rotateY(model, model, angle);
+    mat4.rotateX(model, model, angle * 0.7);
 
-  const eye = cameraPosition();
-  mat4.lookAt(view, eye, [0, 0, 0], [0, 1, 0]);
+    const eye = cameraPosition();
+    mat4.lookAt(view, eye, [0, 0, 0], [0, 1, 0]);
 
-  const aspect = canvas.width / canvas.height;
-  mat4.perspective(proj, Math.PI / 4, aspect, 0.1, 100.0);
-  mat4.multiply(viewProj, proj, view);
+    const aspect = renderer.aspect;
+    mat4.perspective(proj, Math.PI / 4, aspect, 0.1, 100.0);
+    mat4.multiply(viewProj, proj, view);
 
-  shader.use();
-  shader.setMat4("uModel", model);
-  shader.setMat4("uViewProj", viewProj);
+    const lightAngle = time * 0.0005;
+    vec3.set(lightPos, 3.0 * Math.cos(lightAngle), 2.0, 3.0 * Math.sin(lightAngle));
 
-  const lightAngle = time * 0.0005;
-  shader.setVec3("uLightPos", 3.0 * Math.cos(lightAngle), 2.0, 3.0 * Math.sin(lightAngle));
-  shader.setVec3v("uCameraPos", eye);
+    renderer.draw(mesh, texture, { model, viewProj, lightPos, cameraPos: eye });
 
-  checkerboard.bind(0);
-  shader.setInt("uTexture", 0);
-
-  cubeMesh.draw();
+    requestAnimationFrame(frame);
+  }
 
   requestAnimationFrame(frame);
 }
 
-requestAnimationFrame(frame);
+main().catch((err) => {
+  document.body.innerHTML = `<h1 style="color:red;padding:2rem">${err.message}</h1>`;
+  console.error(err);
+});
