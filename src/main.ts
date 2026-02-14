@@ -10,36 +10,29 @@
 //   [x] Step 8 — OBJ Mesh Loading
 //   [x] Step 9 — Normal Mapping
 //   [x] Step 10 — Shadow Mapping
-//   [ ] Step 11 — Multiple Objects / Scene Graph
+//   [x] Step 11 — Multiple Objects / Scene Graph
 //   [ ] Step 12 — Deferred Rendering
 //   [ ] Step 13 — Post-Processing (bloom, tone mapping)
 //   [ ] Step 14 — Skeletal Animation
 
-// Step 10: Shadow Mapping
+// Step 11: Multiple Objects / Scene Graph
 //
-// Shadows ground the scene — without them objects look like they float.
-// We use **shadow mapping**, the most common real-time shadow technique:
+// Until now we drew a single mesh per frame. Real scenes have many objects —
+// a ground plane, multiple props, characters, etc. This step:
 //
-//   1. **Shadow pass** — render the scene from the light's point of view into
-//      a depth-only framebuffer (the "shadow map"). This records how far away
-//      each surface is from the light.
-//   2. **Main pass** — for every fragment, project it into light space and
-//      compare its depth to the shadow map. If the fragment is further from
-//      the light than the recorded depth, it's in shadow.
+//   1. Refactors the Renderer interface: `renderFrame(drawCalls[], frameUniforms)`
+//      replaces the old `beginFrame()` + `draw()` pattern. The renderer handles
+//      the shadow pass and main pass for ALL objects in one call.
 //
-// Challenges solved here:
-//   - **Shadow acne** — a small depth bias prevents surfaces from shadowing
-//     themselves due to floating-point precision issues.
-//   - **Peter panning** — we cull front faces in the shadow pass so the bias
-//     doesn't push shadows away from the caster.
-//   - **Soft edges** — PCF (percentage-closer filtering) averages 9 shadow
-//     samples in a 3×3 kernel for smoother shadow boundaries.
+//   2. Adds a **ground plane** that receives the torus's shadow. The plane uses
+//      the same checkerboard + normal map textures but with its own transform.
 //
-// The light uses an orthographic projection (directional light), which gives
-// uniform shadow quality across the scene.
+//   3. Each frame builds an array of DrawCall objects, each with its own mesh,
+//      texture, normal map, and model matrix. This is a flat scene graph — no
+//      parent-child hierarchy yet, but the pattern extends naturally.
 
 import { mat4, vec3 } from "gl-matrix";
-import type { Renderer, MeshHandle, TextureHandle } from "./engine";
+import type { Renderer, MeshHandle, TextureHandle, DrawCall } from "./engine";
 import { WebGPURenderer } from "./engine";
 import { WebGL2Renderer } from "./engine";
 import { parseObj } from "./objParser";
@@ -83,11 +76,32 @@ async function loadObj(url: string): Promise<Float32Array> {
 // ---------------------------------------------------------------------------
 
 const VERTEX_LAYOUT = [
-  { location: 0, size: 3 }, // position
-  { location: 1, size: 2 }, // texcoord
-  { location: 2, size: 3 }, // normal
-  { location: 3, size: 3 }, // tangent
+  { location: 0, size: 3 },
+  { location: 1, size: 2 },
+  { location: 2, size: 3 },
+  { location: 3, size: 3 },
 ];
+
+// ---------------------------------------------------------------------------
+// Ground plane geometry (two triangles, with tangents)
+// ---------------------------------------------------------------------------
+
+function makeGroundPlane(size: number): Float32Array {
+  // Interleaved: pos(3) + uv(2) + normal(3) + tangent(3) = 11 floats
+  const s = size;
+  // Two triangles forming a quad at y = -1 (CW winding so front face points up)
+  // prettier-ignore
+  return new Float32Array([
+    // Triangle 1
+    -s, -1, -s,  0, 0,  0, 1, 0,  1, 0, 0,
+     s, -1,  s,  1, 1,  0, 1, 0,  1, 0, 0,
+     s, -1, -s,  1, 0,  0, 1, 0,  1, 0, 0,
+    // Triangle 2
+    -s, -1, -s,  0, 0,  0, 1, 0,  1, 0, 0,
+    -s, -1,  s,  0, 1,  0, 1, 0,  1, 0, 0,
+     s, -1,  s,  1, 1,  0, 1, 0,  1, 0, 0,
+  ]);
+}
 
 // ---------------------------------------------------------------------------
 // Procedural textures
@@ -140,7 +154,7 @@ const NORMAL_MAP = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
 
 let camTheta = 0.5;
 let camPhi = 1.0;
-let camRadius = 3.0;
+let camRadius = 4.0;
 
 const CAM_PHI_MIN = 0.1;
 const CAM_PHI_MAX = Math.PI - 0.1;
@@ -193,67 +207,70 @@ canvas.addEventListener("wheel", (e) => {
 // ---------------------------------------------------------------------------
 
 async function main() {
-  const [renderer, rawMeshData] = await Promise.all([
+  const [renderer, rawTorusData] = await Promise.all([
     createRenderer(),
     loadObj("models/torus.obj"),
   ]);
 
-  const meshData = computeTangents(rawMeshData);
-  const mesh: MeshHandle = renderer.createMesh(meshData, VERTEX_LAYOUT);
+  // Create meshes
+  const torusMeshData = computeTangents(rawTorusData);
+  const torusMesh: MeshHandle = renderer.createMesh(torusMeshData, VERTEX_LAYOUT);
 
+  const groundData = makeGroundPlane(3.0);
+  const groundMesh: MeshHandle = renderer.createMesh(groundData, VERTEX_LAYOUT);
+
+  // Create textures
   const texture: TextureHandle = renderer.createTexture({
-    width: TEX_SIZE,
-    height: TEX_SIZE,
-    data: TEX_PIXELS,
+    width: TEX_SIZE, height: TEX_SIZE, data: TEX_PIXELS,
   });
-
   const normalMap: TextureHandle = renderer.createTexture({
-    width: TEX_SIZE,
-    height: TEX_SIZE,
-    data: NORMAL_MAP,
+    width: TEX_SIZE, height: TEX_SIZE, data: NORMAL_MAP,
   });
 
-  const model = mat4.create();
+  // Model matrices
+  const torusModel = mat4.create();
+  const groundModel = mat4.create(); // identity — ground stays put
+
   const view = mat4.create();
   const proj = mat4.create();
   const viewProj = mat4.create();
   const lightPos = vec3.create();
-
-  // Light-space matrices for shadow mapping
   const lightView = mat4.create();
   const lightProj = mat4.create();
   const lightViewProj = mat4.create();
 
   function frame(time: DOMHighResTimeStamp) {
     renderer.resize();
-    renderer.beginFrame();
 
+    // Animate torus
     const angle = time * 0.001;
-    mat4.identity(model);
-    mat4.rotateY(model, model, angle);
-    mat4.rotateX(model, model, angle * 0.7);
+    mat4.identity(torusModel);
+    mat4.rotateY(torusModel, torusModel, angle);
+    mat4.rotateX(torusModel, torusModel, angle * 0.7);
 
+    // Camera
     const eye = cameraPosition();
     mat4.lookAt(view, eye, [0, 0, 0], [0, 1, 0]);
-
-    const aspect = renderer.aspect;
-    mat4.perspective(proj, Math.PI / 4, aspect, 0.1, 100.0);
+    mat4.perspective(proj, Math.PI / 4, renderer.aspect, 0.1, 100.0);
     mat4.multiply(viewProj, proj, view);
 
+    // Light
     const lightAngle = time * 0.0005;
-    vec3.set(lightPos, 3.0 * Math.cos(lightAngle), 2.0, 3.0 * Math.sin(lightAngle));
-
-    // Compute light VP (orthographic, looking at origin from light position)
+    vec3.set(lightPos, 3.0 * Math.cos(lightAngle), 3.0, 3.0 * Math.sin(lightAngle));
     mat4.lookAt(lightView, lightPos, [0, 0, 0], [0, 1, 0]);
-    mat4.ortho(lightProj, -3, 3, -3, 3, 0.1, 10.0);
+    mat4.ortho(lightProj, -4, 4, -4, 4, 0.1, 12.0);
     mat4.multiply(lightViewProj, lightProj, lightView);
 
-    renderer.draw(mesh, texture, {
-      model,
+    // Build draw calls
+    const drawCalls: DrawCall[] = [
+      { mesh: torusMesh, texture, normalMap, model: torusModel },
+      { mesh: groundMesh, texture, normalMap, model: groundModel },
+    ];
+
+    renderer.renderFrame(drawCalls, {
       viewProj,
       lightPos,
       cameraPos: eye,
-      normalMap,
       lightViewProj,
     });
 

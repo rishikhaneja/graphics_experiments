@@ -1,12 +1,11 @@
 // WebGPURenderer — implements the Renderer interface using the WebGPU API.
 //
-// Step 9 adds normal mapping:
-//   - Vertex shader now reads a tangent attribute and computes the TBN matrix.
-//   - Fragment shader samples a normal map and transforms the sample from
-//     tangent space to world space.
-//   - A uHasNormalMap flag uniform controls fallback to the geometric normal.
+// Step 11: updated to use renderFrame() with multiple DrawCalls.
+// Shadow mapping is not yet implemented on the WebGPU backend — shadows
+// are only rendered in WebGL2. The WebGPU path draws all objects with
+// normal mapping but no shadow map.
 
-import type { Renderer, VertexLayout, TextureDesc, MeshHandle, TextureHandle, DrawUniforms } from "./Renderer";
+import type { Renderer, VertexLayout, TextureDesc, MeshHandle, TextureHandle, DrawCall, FrameUniforms } from "./Renderer";
 
 interface GPUMeshHandle extends MeshHandle {
   buffer: GPUBuffer;
@@ -17,7 +16,6 @@ interface GPUTextureHandle extends TextureHandle {
   view: GPUTextureView;
 }
 
-// WGSL shader with normal mapping support.
 const SHADER_SRC = /* wgsl */ `
 struct Uniforms {
   model: mat4x4f,
@@ -99,15 +97,12 @@ export class WebGPURenderer implements Renderer {
   private pipeline: GPURenderPipeline;
   private depthTexture!: GPUTexture;
   private depthView!: GPUTextureView;
-  private uniformBuffer: GPUBuffer;
+  private uniformBuffers: GPUBuffer[] = [];
   private bindGroupLayout: GPUBindGroupLayout;
   private canvas: HTMLCanvasElement;
   private sampler: GPUSampler;
-
-  // Flat 1x1 normal map fallback (keep reference to prevent GC)
   private flatNormalView: GPUTextureView;
 
-  // Uniform buffer size: 2 mat4 (128) + lightPos(12) + pad(4) + cameraPos(12) + hasNormalMap(4) = 160
   private static UNIFORM_SIZE = 160;
 
   private constructor(
@@ -115,7 +110,6 @@ export class WebGPURenderer implements Renderer {
     device: GPUDevice,
     context: GPUCanvasContext,
     pipeline: GPURenderPipeline,
-    uniformBuffer: GPUBuffer,
     bindGroupLayout: GPUBindGroupLayout,
     sampler: GPUSampler,
     flatNormalView: GPUTextureView,
@@ -124,7 +118,6 @@ export class WebGPURenderer implements Renderer {
     this.device = device;
     this.context = context;
     this.pipeline = pipeline;
-    this.uniformBuffer = uniformBuffer;
     this.bindGroupLayout = bindGroupLayout;
     this.sampler = sampler;
     this.flatNormalView = flatNormalView;
@@ -163,12 +156,12 @@ export class WebGPURenderer implements Renderer {
         module: shaderModule,
         entryPoint: "vs",
         buffers: [{
-          arrayStride: 44, // 11 floats × 4 bytes (pos3 + uv2 + normal3 + tangent3)
+          arrayStride: 44,
           attributes: [
-            { shaderLocation: 0, offset: 0, format: "float32x3" },   // position
-            { shaderLocation: 1, offset: 12, format: "float32x2" },  // texcoord
-            { shaderLocation: 2, offset: 20, format: "float32x3" },  // normal
-            { shaderLocation: 3, offset: 32, format: "float32x3" },  // tangent
+            { shaderLocation: 0, offset: 0, format: "float32x3" },
+            { shaderLocation: 1, offset: 12, format: "float32x2" },
+            { shaderLocation: 2, offset: 20, format: "float32x3" },
+            { shaderLocation: 3, offset: 32, format: "float32x3" },
           ],
         }],
       },
@@ -177,7 +170,7 @@ export class WebGPURenderer implements Renderer {
         entryPoint: "fs",
         targets: [{ format }],
       },
-      primitive: { topology: "triangle-list", cullMode: "back" },
+      primitive: { topology: "triangle-list", cullMode: "none" },
       depthStencil: {
         format: "depth24plus",
         depthWriteEnabled: true,
@@ -185,17 +178,11 @@ export class WebGPURenderer implements Renderer {
       },
     });
 
-    const uniformBuffer = device.createBuffer({
-      size: WebGPURenderer.UNIFORM_SIZE,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
-
     const sampler = device.createSampler({
       magFilter: "nearest",
       minFilter: "nearest",
     });
 
-    // 1x1 flat normal texture (tangent-space up: 0,0,1 → 128,128,255)
     const flatNormalTex = device.createTexture({
       size: [1, 1],
       format: "rgba8unorm",
@@ -208,7 +195,7 @@ export class WebGPURenderer implements Renderer {
       [1, 1],
     );
 
-    return new WebGPURenderer(canvas, device, context, pipeline, uniformBuffer, bindGroupLayout, sampler, flatNormalTex.createView());
+    return new WebGPURenderer(canvas, device, context, pipeline, bindGroupLayout, sampler, flatNormalTex.createView());
   }
 
   createMesh(data: Float32Array, _layout: VertexLayout[]): GPUMeshHandle {
@@ -252,42 +239,7 @@ export class WebGPURenderer implements Renderer {
     }
   }
 
-  beginFrame(): void {
-    // Command encoding happens in draw()
-  }
-
-  draw(mesh: GPUMeshHandle, texture: GPUTextureHandle, u: DrawUniforms): void {
-    const hasNormal = !!u.normalMap;
-    const normalView = hasNormal
-      ? (u.normalMap as GPUTextureHandle).view
-      : this.flatNormalView;
-
-    // Create bind group with the correct textures
-    const bindGroup = this.device.createBindGroup({
-      layout: this.bindGroupLayout,
-      entries: [
-        { binding: 0, resource: { buffer: this.uniformBuffer } },
-        { binding: 1, resource: this.sampler },
-        { binding: 2, resource: texture.view },
-        { binding: 3, resource: normalView },
-      ],
-    });
-
-    // Pack uniforms
-    const buf = new ArrayBuffer(WebGPURenderer.UNIFORM_SIZE);
-    const f32 = new Float32Array(buf);
-    f32.set(u.model as unknown as Float32Array, 0);
-    f32.set(u.viewProj as unknown as Float32Array, 16);
-    f32[32] = u.lightPos[0];
-    f32[33] = u.lightPos[1];
-    f32[34] = u.lightPos[2];
-    // f32[35] = padding
-    f32[36] = u.cameraPos[0];
-    f32[37] = u.cameraPos[1];
-    f32[38] = u.cameraPos[2];
-    f32[39] = hasNormal ? 1.0 : 0.0; // hasNormalMap flag
-    this.device.queue.writeBuffer(this.uniformBuffer, 0, buf);
-
+  renderFrame(drawCalls: DrawCall[], u: FrameUniforms): void {
     const encoder = this.device.createCommandEncoder();
     const pass = encoder.beginRenderPass({
       colorAttachments: [{
@@ -305,11 +257,52 @@ export class WebGPURenderer implements Renderer {
     });
 
     pass.setPipeline(this.pipeline);
-    pass.setBindGroup(0, bindGroup);
-    pass.setVertexBuffer(0, mesh.buffer);
-    pass.draw(mesh.vertexCount);
-    pass.end();
 
+    // Ensure we have enough uniform buffers for all draw calls
+    while (this.uniformBuffers.length < drawCalls.length) {
+      this.uniformBuffers.push(this.device.createBuffer({
+        size: WebGPURenderer.UNIFORM_SIZE,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      }));
+    }
+
+    for (let i = 0; i < drawCalls.length; i++) {
+      const dc = drawCalls[i];
+      const mesh = dc.mesh as GPUMeshHandle;
+      const tex = dc.texture as GPUTextureHandle;
+      const hasNormal = !!dc.normalMap;
+      const normalView = hasNormal ? (dc.normalMap as GPUTextureHandle).view : this.flatNormalView;
+
+      // Pack uniforms into this draw call's own buffer
+      const buf = new ArrayBuffer(WebGPURenderer.UNIFORM_SIZE);
+      const f32 = new Float32Array(buf);
+      f32.set(dc.model as unknown as Float32Array, 0);
+      f32.set(u.viewProj as unknown as Float32Array, 16);
+      f32[32] = u.lightPos[0];
+      f32[33] = u.lightPos[1];
+      f32[34] = u.lightPos[2];
+      f32[36] = u.cameraPos[0];
+      f32[37] = u.cameraPos[1];
+      f32[38] = u.cameraPos[2];
+      f32[39] = hasNormal ? 1.0 : 0.0;
+      this.device.queue.writeBuffer(this.uniformBuffers[i], 0, buf);
+
+      const bindGroup = this.device.createBindGroup({
+        layout: this.bindGroupLayout,
+        entries: [
+          { binding: 0, resource: { buffer: this.uniformBuffers[i] } },
+          { binding: 1, resource: this.sampler },
+          { binding: 2, resource: tex.view },
+          { binding: 3, resource: normalView },
+        ],
+      });
+
+      pass.setBindGroup(0, bindGroup);
+      pass.setVertexBuffer(0, mesh.buffer);
+      pass.draw(mesh.vertexCount);
+    }
+
+    pass.end();
     this.device.queue.submit([encoder.finish()]);
   }
 
