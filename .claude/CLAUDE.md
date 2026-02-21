@@ -13,7 +13,7 @@ A from-scratch learning project for 3D graphics, game engine design, and shaders
 
 - **Language:** TypeScript (strict mode)
 - **Bundler:** Vite (dev dependency only)
-- **Graphics APIs:** WebGL2 now, WebGPU later
+- **Graphics APIs:** WebGL2 and WebGPU
 - **Math:** gl-matrix (vectors, matrices, transforms)
 - **Runtime dependencies:** gl-matrix only. Everything else we build ourselves.
 
@@ -27,10 +27,17 @@ A from-scratch learning project for 3D graphics, game engine design, and shaders
 
 ## After Every Change
 
-1. `npx tsc --noEmit` — verify no type errors
-2. `npm run dev` — confirm it runs and renders correctly
+1. `npx tsc` — verify no type errors
+2. `node test/console.mjs` — launch headless browser against the running dev server (port 5199) and check for console errors
 3. Update the roadmap
 4. **Report any debt.** If you had to cut corners, report it and ask for recommendations.
+
+## Deployment
+
+- Auto-deploys to GitHub Pages on push to `master` via `.github/workflows/deploy.yml`.
+- Live at: https://rishikhaneja.github.io/graphics_experiments/
+- Vite `base` is set to `/graphics_experiments/` so asset paths resolve on Pages.
+- After build, output goes to `dist/` (gitignored). Vite handles bundling; `tsc` only type-checks (`noEmit: true`).
 
 ## Environment
 
