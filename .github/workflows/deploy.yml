@@ -1,0 +1,53 @@
+# Builds the Vite project and deploys dist/ to GitHub Pages on every push to master.
+# Requires: repo Settings > Pages > Source set to "GitHub Actions".
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [master]
+
+# Minimum permissions for Pages deployment via OIDC
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one deploy at a time; cancel older runs if a new push arrives
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    # Link this job to the github-pages environment so the URL shows in the repo UI
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      # 1. Clone the repo
+      - uses: actions/checkout@v4
+
+      # 2. Set up Node and cache node_modules based on package-lock.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # 3. Clean install dependencies (ci = exact lockfile versions, faster than npm install)
+      - run: npm ci
+
+      # 4. Type-check with tsc, then bundle with Vite → outputs to dist/
+      - run: npm run build
+
+      # 5. Configure Pages (reads base URL, injects metadata)
+      - uses: actions/configure-pages@v5
+
+      # 6. Package dist/ as a Pages artifact for deployment
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+      # 7. Deploy the artifact to GitHub Pages
+      - id: deployment
+        uses: actions/deploy-pages@v4

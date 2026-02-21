@@ -1,14 +1,15 @@
 {
   "compilerOptions": {
-    "target": "ES2020",
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "strict": true,
-    "noUnusedLocals": true,
-    "noUnusedParameters": true,
-    "isolatedModules": true,
-    "skipLibCheck": true,
-    "types": ["@webgpu/types"]
+    "target": "ES2020",                // Output syntax level; Vite handles final downleveling
+    "module": "ESNext",                // Emit ES modules (import/export)
+    "moduleResolution": "bundler",     // Resolve imports the way Vite does
+    "strict": true,                    // Enable all strict type-checking options
+    "noUnusedLocals": true,            // Error on declared-but-unused variables
+    "noUnusedParameters": true,        // Error on unused function parameters
+    "isolatedModules": true,           // Ensure each file can be transpiled independently (required by Vite)
+    "noEmit": true,                    // Vite handles transpilation; tsc is only for type-checking
+    "skipLibCheck": true,              // Skip type-checking .d.ts files for faster builds
+    "types": ["@webgpu/types"]         // Include WebGPU type definitions
   },
-  "include": ["src"]
+  "include": ["src"]                   // Only type-check files under src/
 }

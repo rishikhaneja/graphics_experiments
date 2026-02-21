@@ -25,6 +25,17 @@
   </head>
   <body>
     <canvas id="canvas"></canvas>
+    <!-- Description overlay (top-left) -->
+    <div id="description" style="
+      position: fixed; top: 10px; left: 10px; z-index: 100;
+      font: 13px monospace; padding: 8px 12px;
+      background: rgba(0,0,0,0.75); color: #eee; border-radius: 6px;
+      user-select: none;
+    ">
+      A from-scratch 3D graphics engine in TypeScript ·
+      <a href="https://github.com/rishikhaneja/graphics_experiments" target="_blank"
+         style="color: #88f; text-decoration: none;">GitHub</a>
+    </div>
     <div id="controls" style="
       position: fixed; top: 10px; right: 10px; z-index: 100;
       font: 13px monospace; padding: 8px 12px;
