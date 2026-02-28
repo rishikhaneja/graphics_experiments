@@ -1,0 +1,127 @@
+<mxfile host="app.diagrams.net" modified="2026-02-28T00:00:00.000Z" agent="Claude" version="24.0.0" type="device">
+  <diagram id="rendering-pipeline" name="Rendering Pipeline">
+    <mxGraphModel dx="1200" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1200" pageHeight="900" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- Title -->
+        <mxCell id="title" value="&lt;b&gt;Deferred Rendering Pipeline&lt;/b&gt;" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=16;" vertex="1" parent="1">
+          <mxGeometry x="400" y="20" width="260" height="30" as="geometry" />
+        </mxCell>
+
+        <!-- Draw Calls input -->
+        <mxCell id="input" value="DrawCall[] + FrameUniforms" style="text;html=1;align=center;verticalAlign=middle;fillColor=none;strokeColor=none;fontSize=11;fontColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="410" y="60" width="180" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="input_arrow" style="edgeStyle=orthogonalEdgeStyle;rounded=0;strokeColor=#666666;" edge="1" parent="1" source="input" target="shadow">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Pass 1: Shadow -->
+        <mxCell id="shadow" value="&lt;b&gt;Pass 1: Shadow&lt;/b&gt;&lt;br&gt;Depth-only from light POV&lt;br&gt;&lt;font color=&quot;#888888&quot; style=&quot;font-size:10px&quot;&gt;1024×1024 · front-face culling&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;verticalAlign=middle;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="370" y="100" width="260" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- Shadow output label -->
+        <mxCell id="shadow_out" value="depth texture" style="text;html=1;align=center;verticalAlign=middle;fillColor=none;strokeColor=none;fontSize=10;fontColor=#888888;" vertex="1" parent="1">
+          <mxGeometry x="510" y="168" width="80" height="14" as="geometry" />
+        </mxCell>
+
+        <!-- Arrow: Shadow → G-Buffer -->
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;strokeColor=#6c8ebf;" edge="1" parent="1" source="shadow" target="gbuffer">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Pass 2: G-Buffer -->
+        <mxCell id="gbuffer" value="&lt;b&gt;Pass 2: G-Buffer&lt;/b&gt;&lt;br&gt;Geometry → MRT (3 targets)&lt;br&gt;&lt;font color=&quot;#888888&quot; style=&quot;font-size:10px&quot;&gt;RT0: position (RGBA16F) · RT1: normal (RGBA16F) · RT2: albedo (RGBA8)&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;verticalAlign=middle;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="320" y="200" width="360" height="65" as="geometry" />
+        </mxCell>
+
+        <!-- G-Buffer output label -->
+        <mxCell id="gbuf_out" value="3 textures + shadow map" style="text;html=1;align=center;verticalAlign=middle;fillColor=none;strokeColor=none;fontSize=10;fontColor=#888888;" vertex="1" parent="1">
+          <mxGeometry x="490" y="273" width="140" height="14" as="geometry" />
+        </mxCell>
+
+        <!-- Arrow: G-Buffer → Lighting -->
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;strokeColor=#6c8ebf;" edge="1" parent="1" source="gbuffer" target="lighting">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Pass 3: Lighting -->
+        <mxCell id="lighting" value="&lt;b&gt;Pass 3: Lighting&lt;/b&gt;&lt;br&gt;Fullscreen · Blinn-Phong + PCF shadow&lt;br&gt;&lt;font color=&quot;#888888&quot; style=&quot;font-size:10px&quot;&gt;Reads G-Buffer + shadow map · Specular ×2 for bloom · Output: HDR (RGBA16F)&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;verticalAlign=middle;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="310" y="305" width="380" height="65" as="geometry" />
+        </mxCell>
+
+        <!-- Arrow: Lighting → Post-processing group -->
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;strokeColor=#6c8ebf;" edge="1" parent="1" source="lighting" target="bloom">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- HDR output label -->
+        <mxCell id="hdr_out" value="HDR scene texture" style="text;html=1;align=center;verticalAlign=middle;fillColor=none;strokeColor=none;fontSize=10;fontColor=#888888;" vertex="1" parent="1">
+          <mxGeometry x="510" y="378" width="110" height="14" as="geometry" />
+        </mxCell>
+
+        <!-- Post-processing dashed group -->
+        <mxCell id="pp_group" value="&lt;font color=&quot;#999999&quot; style=&quot;font-size:10px&quot;&gt;⬡ Skipped when post-processing is off&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#999999;dashed=1;dashPattern=8 4;verticalAlign=top;fontSize=10;spacingTop=2;align=right;spacingRight=8;" vertex="1" parent="1">
+          <mxGeometry x="340" y="395" width="320" height="170" as="geometry" />
+        </mxCell>
+
+        <!-- Pass 4: Bloom Extract -->
+        <mxCell id="bloom" value="&lt;b&gt;Pass 4: Bloom Extract&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#888888&quot; style=&quot;font-size:10px&quot;&gt;Threshold &amp;gt; 1.0 · Half resolution&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;verticalAlign=middle;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="375" y="420" width="250" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- Arrow: Bloom → Blur -->
+        <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;strokeColor=#d6b656;" edge="1" parent="1" source="bloom" target="blur">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Pass 5: Gaussian Blur -->
+        <mxCell id="blur" value="&lt;b&gt;Pass 5: Gaussian Blur&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#888888&quot; style=&quot;font-size:10px&quot;&gt;Separable H+V · 5 iterations · Ping-pong FBOs&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;verticalAlign=middle;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="375" y="495" width="250" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- Arrow: Blur → Composite -->
+        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;strokeColor=#d6b656;" edge="1" parent="1" source="blur" target="composite">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Pass 6: Composite -->
+        <mxCell id="composite" value="&lt;b&gt;Pass 6: Composite + Tone Map&lt;/b&gt;&lt;br&gt;HDR + bloom → ACES filmic tone mapping&lt;br&gt;&lt;font color=&quot;#888888&quot; style=&quot;font-size:10px&quot;&gt;Gamma correction (1/2.2) → Screen&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;verticalAlign=middle;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="340" y="590" width="320" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- Screen output -->
+        <mxCell id="screen" value="🖥 Screen" style="text;html=1;align=center;verticalAlign=middle;fillColor=none;strokeColor=none;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="455" y="670" width="90" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;strokeColor=#82b366;" edge="1" parent="1" source="composite" target="screen">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Legend -->
+        <mxCell id="leg1" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="50" y="700" width="16" height="12" as="geometry" />
+        </mxCell>
+        <mxCell id="leg1t" value="Geometry / Lighting passes" style="text;html=1;align=left;verticalAlign=middle;fillColor=none;strokeColor=none;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="72" y="696" width="160" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="leg2" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="50" y="720" width="16" height="12" as="geometry" />
+        </mxCell>
+        <mxCell id="leg2t" value="Post-processing (optional)" style="text;html=1;align=left;verticalAlign=middle;fillColor=none;strokeColor=none;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="72" y="716" width="160" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="leg3" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="50" y="740" width="16" height="12" as="geometry" />
+        </mxCell>
+        <mxCell id="leg3t" value="Final output" style="text;html=1;align=left;verticalAlign=middle;fillColor=none;strokeColor=none;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="72" y="736" width="160" height="20" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

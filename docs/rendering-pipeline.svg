@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="760" viewBox="0 0 720 760" font-family="Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="none" stroke="#6c8ebf" stroke-width="1.2"/>
+    </marker>
+    <marker id="arrow-yellow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="none" stroke="#d6b656" stroke-width="1.2"/>
+    </marker>
+    <marker id="arrow-green" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="none" stroke="#82b366" stroke-width="1.2"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="720" height="760" fill="white"/>
+
+  <!-- Title -->
+  <text x="360" y="32" text-anchor="middle" font-size="18" font-weight="bold" fill="#333">Deferred Rendering Pipeline</text>
+
+  <!-- Input label -->
+  <text x="360" y="58" text-anchor="middle" font-size="11" fill="#888">DrawCall[] + FrameUniforms</text>
+
+  <!-- Arrow: Input → Shadow -->
+  <line x1="360" y1="64" x2="360" y2="78" stroke="#999" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+  <!-- Pass 1: Shadow -->
+  <rect x="210" y="82" width="300" height="58" rx="8" fill="#dae8fc" stroke="#6c8ebf" stroke-width="1.5"/>
+  <text x="360" y="103" text-anchor="middle" font-size="13" font-weight="bold" fill="#333">Pass 1: Shadow</text>
+  <text x="360" y="119" text-anchor="middle" font-size="11" fill="#555">Depth-only from light POV</text>
+  <text x="360" y="133" text-anchor="middle" font-size="10" fill="#888">1024×1024 · front-face culling</text>
+
+  <!-- Arrow: Shadow → G-Buffer -->
+  <line x1="360" y1="140" x2="360" y2="162" stroke="#6c8ebf" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="455" y="155" text-anchor="start" font-size="9" fill="#aaa">depth texture</text>
+
+  <!-- Pass 2: G-Buffer -->
+  <rect x="170" y="166" width="380" height="68" rx="8" fill="#dae8fc" stroke="#6c8ebf" stroke-width="1.5"/>
+  <text x="360" y="188" text-anchor="middle" font-size="13" font-weight="bold" fill="#333">Pass 2: G-Buffer</text>
+  <text x="360" y="204" text-anchor="middle" font-size="11" fill="#555">Geometry → MRT (3 render targets)</text>
+  <text x="360" y="220" text-anchor="middle" font-size="9" fill="#888">RT0: position (RGBA16F)  ·  RT1: normal (RGBA16F)  ·  RT2: albedo (RGBA8)</text>
+
+  <!-- Arrow: G-Buffer → Lighting -->
+  <line x1="360" y1="234" x2="360" y2="256" stroke="#6c8ebf" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="455" y="249" text-anchor="start" font-size="9" fill="#aaa">3 textures + shadow map</text>
+
+  <!-- Pass 3: Lighting -->
+  <rect x="160" y="260" width="400" height="68" rx="8" fill="#dae8fc" stroke="#6c8ebf" stroke-width="1.5"/>
+  <text x="360" y="282" text-anchor="middle" font-size="13" font-weight="bold" fill="#333">Pass 3: Lighting</text>
+  <text x="360" y="298" text-anchor="middle" font-size="11" fill="#555">Fullscreen · Blinn-Phong + PCF shadow sampling</text>
+  <text x="360" y="314" text-anchor="middle" font-size="9" fill="#888">Reads G-Buffer + shadow map · Specular ×2 for bloom · Output: HDR (RGBA16F)</text>
+
+  <!-- Arrow: Lighting → Bloom -->
+  <line x1="360" y1="328" x2="360" y2="395" stroke="#6c8ebf" stroke-width="1.5" marker-end="url(#arrow-yellow)"/>
+  <text x="455" y="365" text-anchor="start" font-size="9" fill="#aaa">HDR scene texture</text>
+
+  <!-- Post-processing dashed box -->
+  <rect x="195" y="380" width="330" height="210" rx="10" fill="none" stroke="#bbb" stroke-width="1.2" stroke-dasharray="8 4"/>
+  <text x="520" y="396" text-anchor="end" font-size="9" fill="#aaa">skipped when post-processing is off</text>
+
+  <!-- Pass 4: Bloom Extract -->
+  <rect x="220" y="400" width="280" height="50" rx="8" fill="#fff2cc" stroke="#d6b656" stroke-width="1.5"/>
+  <text x="360" y="420" text-anchor="middle" font-size="13" font-weight="bold" fill="#333">Pass 4: Bloom Extract</text>
+  <text x="360" y="438" text-anchor="middle" font-size="10" fill="#888">Threshold &gt; 1.0 · Half resolution</text>
+
+  <!-- Arrow: Bloom → Blur -->
+  <line x1="360" y1="450" x2="360" y2="475" stroke="#d6b656" stroke-width="1.5" marker-end="url(#arrow-yellow)"/>
+
+  <!-- Pass 5: Gaussian Blur -->
+  <rect x="220" y="479" width="280" height="50" rx="8" fill="#fff2cc" stroke="#d6b656" stroke-width="1.5"/>
+  <text x="360" y="499" text-anchor="middle" font-size="13" font-weight="bold" fill="#333">Pass 5: Gaussian Blur</text>
+  <text x="360" y="517" text-anchor="middle" font-size="10" fill="#888">Separable H+V · 5 iterations · Ping-pong FBOs</text>
+
+  <!-- Arrow: Blur → Composite -->
+  <line x1="360" y1="529" x2="360" y2="555" stroke="#d6b656" stroke-width="1.5"/>
+
+  <!-- Arrow into Composite -->
+  <line x1="360" y1="555" x2="360" y2="610" stroke="#82b366" stroke-width="1.5" marker-end="url(#arrow-green)"/>
+
+  <!-- Pass 6: Composite -->
+  <rect x="185" y="614" width="350" height="60" rx="8" fill="#d5e8d4" stroke="#82b366" stroke-width="1.5"/>
+  <text x="360" y="636" text-anchor="middle" font-size="13" font-weight="bold" fill="#333">Pass 6: Composite + Tone Map</text>
+  <text x="360" y="652" text-anchor="middle" font-size="11" fill="#555">HDR + bloom → ACES filmic tone mapping</text>
+  <text x="360" y="666" text-anchor="middle" font-size="10" fill="#888">Gamma correction (1/2.2) → Screen</text>
+
+  <!-- Arrow: Composite → Screen -->
+  <line x1="360" y1="674" x2="360" y2="698" stroke="#82b366" stroke-width="1.5" marker-end="url(#arrow-green)"/>
+
+  <!-- Screen -->
+  <text x="360" y="716" text-anchor="middle" font-size="13" font-weight="bold" fill="#333">Screen</text>
+
+  <!-- Legend -->
+  <rect x="30" y="700" width="14" height="10" rx="3" fill="#dae8fc" stroke="#6c8ebf" stroke-width="1"/>
+  <text x="50" y="709" font-size="10" fill="#666">Geometry / Lighting</text>
+  <rect x="30" y="716" width="14" height="10" rx="3" fill="#fff2cc" stroke="#d6b656" stroke-width="1"/>
+  <text x="50" y="725" font-size="10" fill="#666">Post-processing (optional)</text>
+  <rect x="30" y="732" width="14" height="10" rx="3" fill="#d5e8d4" stroke="#82b366" stroke-width="1"/>
+  <text x="50" y="741" font-size="10" fill="#666">Final output</text>
+</svg>
