@@ -11,3 +11,4 @@ export type { Material } from "./Material";
 export { Entity } from "./Entity";
 export { OrbitCamera } from "./OrbitCamera";
 export { Light } from "./Light";
+export { Scene } from "./Scene";

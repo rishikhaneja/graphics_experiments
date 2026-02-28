@@ -30,9 +30,9 @@
 //
 // Both WebGL2 and WebGPU backends implement the full pipeline.
 
-import { mat4, vec3, quat } from "gl-matrix";
-import type { Renderer, MeshHandle, TextureHandle, DrawCall, RenderOptions, Material } from "./engine";
-import { WebGPURenderer, WebGL2Renderer, Entity, OrbitCamera, Light } from "./engine";
+import { vec3, quat } from "gl-matrix";
+import type { Renderer, MeshHandle, TextureHandle, RenderOptions, Material } from "./engine";
+import { WebGPURenderer, WebGL2Renderer, Entity, OrbitCamera, Light, Scene } from "./engine";
 import { parseObj } from "./objParser";
 import { computeTangents } from "./tangents";
 
@@ -206,32 +206,23 @@ async function main() {
   };
   const ground = new Entity(groundMesh, checkerMaterial);
 
-  // Camera & light
-  const viewProj = mat4.create();
+  // Light
   const light = new Light();
   light.onUpdate = (time) => {
     const a = time * 0.0005;
     vec3.set(light.position, 3.0 * Math.cos(a), 3.0, 3.0 * Math.sin(a));
   };
-  const lightViewProj = mat4.create();
+
+  // Scene
+  const scene = new Scene(camera, light);
+  scene.add(torus);
+  scene.add(ground);
 
   function frame(time: DOMHighResTimeStamp) {
     renderer.resize();
+    scene.update(time);
 
-    // Update entities
-    torus.update(time);
-    ground.update(time);
-
-    // Camera
-    camera.viewProjection(viewProj, renderer.aspect);
-    const eye = camera.position();
-
-    // Light
-    light.update(time);
-    light.viewProjection(lightViewProj);
-
-    // Build draw calls from entities
-    const drawCalls: DrawCall[] = [torus.drawCall(), ground.drawCall()];
+    const { drawCalls, uniforms } = scene.buildFrame(renderer.aspect);
 
     const options: RenderOptions = {
       shadows: shadowsToggle.checked,
@@ -239,13 +230,7 @@ async function main() {
       postProcessing: postprocToggle.checked,
     };
 
-    renderer.renderFrame(drawCalls, {
-      viewProj,
-      lightPos: light.position,
-      cameraPos: eye,
-      lightViewProj,
-    }, options);
-
+    renderer.renderFrame(drawCalls, uniforms, options);
     requestAnimationFrame(frame);
   }
 
