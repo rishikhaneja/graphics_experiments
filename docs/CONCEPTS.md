@@ -23,6 +23,19 @@ Toggled by the **Post-Processing** checkbox in the UI.
 
 ---
 
+## Component / Entity
+
+A way to organize game objects. Instead of one giant object that knows how to do everything, you split things into small pieces:
+
+- **Entity** — a "thing" in the scene (a torus, a ground plane). It has a transform (where it is), a mesh (what it looks like), a material (how its surface looks), and optionally some behavior (how it moves).
+- **Component** — a single aspect of an entity. In a full ECS (Entity-Component-System), components are pure data and systems operate on them. This project uses a simpler model: `Entity` is a class with `Transform`, `Material`, and an `onUpdate` callback.
+
+The benefit: adding a new object to the scene is just `new Entity(mesh, material)` + `scene.add(entity)`. No need to touch the render loop.
+
+In this project: `src/engine/Entity.ts`. Each entity produces a `DrawCall` via `entity.drawCall()`.
+
+---
+
 ## Deferred Rendering
 
 A strategy that separates "what is the geometry?" from "how should it be lit?"
@@ -59,6 +72,19 @@ In this project, three render targets:
 | RT2 | RGBA8 | Albedo (surface color) |
 
 These are written in pass 2 and read in pass 3 (lighting). See `gBufFBO` in both renderers.
+
+---
+
+## Game Loop
+
+The heartbeat of a game engine. Every frame, the engine runs the same cycle:
+
+1. **Update** — move objects, run animations, process input
+2. **Render** — draw everything to screen
+
+Separating update from render keeps game logic independent of rendering. You could swap the renderer without touching gameplay code, or run updates at a different rate than rendering (fixed timestep).
+
+In this project: `src/engine/Engine.ts`. `Engine.start()` kicks off `requestAnimationFrame`. Each tick calls `scene.update(time)` then `scene.buildFrame()` then `renderer.renderFrame()`.
 
 ---
 
@@ -108,6 +134,34 @@ The lighting shader reads this texture and uses the encoded direction instead of
 In this project: `NORMAL_MAP` (beveled tile edges) in `src/main.ts`. Toggled by the **Normal Maps** checkbox. When off, a flat 1×1 `(128, 128, 255)` texture is used.
 
 See also: **Tangent**, **TBN Matrix**.
+
+---
+
+## Quaternion
+
+A way to represent rotations without the problems of Euler angles (like gimbal lock). A quaternion is four numbers (x, y, z, w) that encode an axis and angle of rotation. They compose nicely — you can chain rotations by multiplying quaternions — and they interpolate smoothly (slerp).
+
+You almost never manipulate the four components directly. Instead you use helpers like `quat.rotateY()` or `quat.fromEuler()`.
+
+In this project: `Transform.rotation` in `src/engine/Transform.ts` stores a `quat`. The torus animation in `main.ts` uses `quat.rotateY` + `quat.rotateX` each frame.
+
+---
+
+## Scene Graph
+
+A data structure that organizes all the objects in a scene. At minimum it's a list of entities. In more complex engines it's a tree (parent-child transforms), so moving a parent moves all its children.
+
+In this project: `src/engine/Scene.ts` holds a flat list of `Entity` objects plus a camera and light. `scene.update(time)` ticks everything; `scene.buildFrame(aspect)` collects all the `DrawCall[]` and `FrameUniforms` the renderer needs.
+
+---
+
+## Transform
+
+The "where is this thing?" of an entity. Stores position, rotation, and scale. Combined into a 4×4 model matrix (T × R × S) that the renderer uses to place the object in world space.
+
+When transforms have parents, the world matrix is computed by multiplying the parent's world matrix with the child's local matrix — this is how a turret rotates with its tank.
+
+In this project: `src/engine/Transform.ts`. Uses `vec3` for position/scale and `quat` for rotation. `worldMatrix(out)` walks the parent chain.
 
 ---
 

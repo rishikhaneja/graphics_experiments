@@ -13,26 +13,26 @@
 //   [x] Step 11 — Multiple Objects / Scene Graph
 //   [x] Step 12 — Deferred Rendering
 //   [x] Step 13 — Post-Processing (bloom, tone mapping)
-//   [ ] Step 14 — Game-Engine Refactor
+//   [x] Step 14 — Game-Engine Refactor
 
-// Step 13: Post-Processing — bloom and tone mapping
+// Step 14: Game-Engine Refactor
 //
-// Building on the deferred pipeline (Step 12), we add a post-processing
-// chain after the lighting pass:
+// Restructures the layer above Renderer into reusable engine modules:
 //
-//   1. Lighting pass now renders to an HDR framebuffer (RGBA16F) with
-//      boosted specular (values > 1.0) so bright spots feed the bloom.
-//   2. Bloom extraction — threshold pass isolates bright pixels (> 1.0).
-//   3. Gaussian blur — separable horizontal + vertical, ping-ponged 5×
-//      at half resolution for a wide, soft glow.
-//   4. Composite — combines HDR scene + blurred bloom, then applies
-//      ACES filmic tone mapping and gamma correction.
+//   Transform  — position/rotation(quat)/scale + parent-child hierarchy
+//   Material   — bundles texture + normalMap
+//   Entity     — transform + mesh + material + onUpdate callback
+//   OrbitCamera — camera state + mouse/wheel input
+//   Light      — position + shadow view-projection
+//   Scene      — entity list + camera + light; builds DrawCall[]/FrameUniforms
+//   Engine     — owns rAF loop with update/render separation
 //
-// Both WebGL2 and WebGPU backends implement the full pipeline.
+// main.ts now just wires things together: create renderer, load assets,
+// build entities, assemble scene, start engine.
 
 import { vec3, quat } from "gl-matrix";
 import type { Renderer, MeshHandle, TextureHandle, RenderOptions, Material } from "./engine";
-import { WebGPURenderer, WebGL2Renderer, Entity, OrbitCamera, Light, Scene } from "./engine";
+import { WebGPURenderer, WebGL2Renderer, Entity, OrbitCamera, Light, Scene, Engine } from "./engine";
 import { parseObj } from "./objParser";
 import { computeTangents } from "./tangents";
 
@@ -218,23 +218,19 @@ async function main() {
   scene.add(torus);
   scene.add(ground);
 
-  function frame(time: DOMHighResTimeStamp) {
-    renderer.resize();
-    scene.update(time);
+  // Engine
+  const options: RenderOptions = {
+    shadows: shadowsToggle.checked,
+    normalMaps: normalsToggle.checked,
+    postProcessing: postprocToggle.checked,
+  };
+  const engine = new Engine(renderer, scene, options);
 
-    const { drawCalls, uniforms } = scene.buildFrame(renderer.aspect);
+  shadowsToggle.addEventListener("change", () => { engine.options.shadows = shadowsToggle.checked; });
+  normalsToggle.addEventListener("change", () => { engine.options.normalMaps = normalsToggle.checked; });
+  postprocToggle.addEventListener("change", () => { engine.options.postProcessing = postprocToggle.checked; });
 
-    const options: RenderOptions = {
-      shadows: shadowsToggle.checked,
-      normalMaps: normalsToggle.checked,
-      postProcessing: postprocToggle.checked,
-    };
-
-    renderer.renderFrame(drawCalls, uniforms, options);
-    requestAnimationFrame(frame);
-  }
-
-  requestAnimationFrame(frame);
+  engine.start();
 }
 
 main().catch((err) => {

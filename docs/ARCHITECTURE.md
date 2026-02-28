@@ -6,13 +6,20 @@ How the rendering engine works, from entry point to pixels on screen.
 
 ```
 src/
-  main.ts              Entry point — scene setup, camera, animation loop
+  main.ts              Entry point — wires renderer, assets, entities, engine
   objParser.ts         Wavefront OBJ file parser (position + UV + normal)
   tangents.ts          Per-triangle tangent computation for normal mapping
   engine/
     Renderer.ts        Backend-agnostic interface (the contract)
     WebGL2Renderer.ts  WebGL2 implementation (GLSL shaders inline)
     WebGPURenderer.ts  WebGPU implementation (WGSL shaders inline)
+    Transform.ts       Position/rotation(quat)/scale + parent-child hierarchy
+    Material.ts        Bundles texture + normalMap
+    Entity.ts          Transform + mesh + material + onUpdate callback
+    OrbitCamera.ts     Camera state + mouse/wheel orbit controls
+    Light.ts           Light position + shadow view-projection
+    Scene.ts           Entity list + camera + light; builds DrawCall[]/FrameUniforms
+    Engine.ts          Owns rAF loop with update/render separation
     Mesh.ts            VAO/VBO helper (early abstraction, Step 6)
     ShaderProgram.ts   Shader compilation helper (early abstraction, Step 6)
     Texture.ts         Texture wrapper (early abstraction, Step 6)
@@ -34,7 +41,23 @@ src/
 | `MeshHandle` | Opaque handle with `vertexCount` |
 | `TextureHandle` | Opaque handle (backends attach their own data) |
 
-`main.ts` programs entirely against this interface. Backend is selected at startup via `?backend=` query parameter — WebGPU is attempted first, with WebGL2 as fallback.
+`Engine` and `Scene` program against this interface. Backend is selected at startup via `?backend=` query parameter — WebGPU is attempted first, with WebGL2 as fallback.
+
+## Engine Layer
+
+Above the `Renderer` sits the engine layer (added in Step 14). These modules handle scene management and the game loop:
+
+| Module | Purpose |
+|--------|---------|
+| `Transform` | Position (`vec3`), rotation (`quat`), scale (`vec3`) with parent-child hierarchy. `worldMatrix()` walks the parent chain. |
+| `Material` | Interface bundling `TextureHandle` + optional normal map. |
+| `Entity` | Combines `Transform` + `MeshHandle` + `Material`. Optional `onUpdate(time)` callback for per-frame behavior. `drawCall()` produces a `DrawCall` for the renderer. |
+| `OrbitCamera` | Encapsulates theta/phi/radius orbit state and mouse/wheel input. `attach(canvas)` binds listeners. `viewProjection(out, aspect)` builds the VP matrix. |
+| `Light` | Light position with optional `onUpdate` animation. `viewProjection(out)` builds the shadow-map VP matrix. |
+| `Scene` | Holds `Entity[]`, `OrbitCamera`, and `Light`. `update(time)` ticks everything; `buildFrame(aspect)` returns `{ drawCalls, uniforms }`. |
+| `Engine` | Owns the `requestAnimationFrame` loop. Calls `scene.update()`, `scene.buildFrame()`, and `renderer.renderFrame()` each frame. |
+
+`main.ts` creates the renderer, loads assets, builds entities/scene, and calls `engine.start()`.
 
 ## Rendering Pipeline
 
@@ -92,10 +115,9 @@ Interleaved, 11 floats per vertex (44 bytes stride):
 
 ## Runtime Loop
 
-`main.ts` drives the renderer each frame via `requestAnimationFrame`:
+`Engine.start()` drives the frame loop via `requestAnimationFrame`:
 
-1. **Update transforms** — torus rotates on two axes
-2. **Camera** — orbit position from mouse drag + scroll wheel zoom, then build view/projection matrix
-3. **Light** — orbits the scene; compute light-space viewProj for shadow mapping
-4. **Build draw calls** — `DrawCall[]` array (torus + ground), `RenderOptions` from UI checkboxes
-5. **Render** — `renderer.renderFrame(drawCalls, uniforms, options)`
+1. **Resize** — `renderer.resize()` syncs canvas to display size
+2. **Update** — `scene.update(time)` calls each entity's `onUpdate` callback (torus rotation, light orbit)
+3. **Build frame** — `scene.buildFrame(aspect)` collects `DrawCall[]` and `FrameUniforms` from all entities, camera, and light
+4. **Render** — `renderer.renderFrame(drawCalls, uniforms, options)` runs the 6-pass deferred pipeline
