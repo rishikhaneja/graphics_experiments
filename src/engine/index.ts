@@ -6,3 +6,5 @@ export type { TextureOptions } from "./Texture";
 export type { Renderer, VertexLayout, TextureDesc, MeshHandle, TextureHandle, DrawCall, FrameUniforms, RenderOptions } from "./Renderer";
 export { WebGL2Renderer } from "./WebGL2Renderer";
 export { WebGPURenderer } from "./WebGPURenderer";
+export { Transform } from "./Transform";
+export type { Material } from "./Material";

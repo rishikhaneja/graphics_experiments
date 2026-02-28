@@ -13,7 +13,7 @@
 //   [x] Step 11 — Multiple Objects / Scene Graph
 //   [x] Step 12 — Deferred Rendering
 //   [x] Step 13 — Post-Processing (bloom, tone mapping)
-//   [ ] Step 14 — Skeletal Animation
+//   [ ] Step 14 — Game-Engine Refactor
 
 // Step 13: Post-Processing — bloom and tone mapping
 //
