@@ -1,3 +1,5 @@
+// Transform — position, rotation (quat), and scale with a parent pointer for hierarchy.
+
 import { mat4, vec3, quat } from "gl-matrix";
 
 export class Transform {

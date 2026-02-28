@@ -1,3 +1,5 @@
+// Material — surface appearance: albedo texture, optional normal map, and emissive flag.
+
 import type { TextureHandle } from "./Renderer";
 
 export interface Material {

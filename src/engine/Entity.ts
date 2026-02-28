@@ -1,3 +1,5 @@
+// Entity — a renderable object: transform + mesh + material, with an optional per-frame callback.
+
 import { mat4 } from "gl-matrix";
 import type { MeshHandle, DrawCall } from "./Renderer";
 import type { Material } from "./Material";

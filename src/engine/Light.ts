@@ -1,3 +1,5 @@
+// Light — a point light with position, optional animation, and shadow-map view-projection.
+
 import { mat4, vec3 } from "gl-matrix";
 
 export class Light {

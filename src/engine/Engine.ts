@@ -1,3 +1,5 @@
+// Engine — owns the requestAnimationFrame loop, calling update then render each frame.
+
 import type { Renderer, RenderOptions } from "./Renderer";
 import type { Scene } from "./Scene";
 

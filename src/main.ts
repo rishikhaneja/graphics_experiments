@@ -1,3 +1,5 @@
+// main.ts — entry point. Loads assets, wires up the engine, and starts the render loop.
+//
 // Roadmap:
 //   [x] Step 0 — Project Scaffold
 //   [x] Step 1 — Hello Triangle

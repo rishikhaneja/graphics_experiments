@@ -29,6 +29,7 @@ A from-scratch learning project for 3D graphics, game engine design, and shaders
 - Use gl-matrix for math (vec3, mat4, etc.). No other external graphics libraries.
 - Each learning step is one or more git commits. Keep commit messages short (e.g. "Step 1: hello triangle", "Step 14b: Add Entity class").
 - Do not add Co-Authored-By lines to commits.
+- Every source file starts with a brief `//` comment describing what the file is and does.
 - Roadmap lives at the top of `src/main.ts`.
 
 ## After Every Change

@@ -1,3 +1,5 @@
+// index.ts — barrel file that re-exports every public engine symbol.
+
 export { ShaderProgram } from "./ShaderProgram";
 export { Mesh } from "./Mesh";
 export type { VertexAttribute } from "./Mesh";

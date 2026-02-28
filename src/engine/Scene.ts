@@ -1,3 +1,5 @@
+// Scene — holds the entity list, camera, and light; builds DrawCall[] and FrameUniforms each frame.
+
 import { mat4 } from "gl-matrix";
 import type { DrawCall, FrameUniforms } from "./Renderer";
 import type { OrbitCamera } from "./OrbitCamera";

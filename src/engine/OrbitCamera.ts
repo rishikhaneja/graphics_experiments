@@ -1,3 +1,5 @@
+// OrbitCamera — spherical-coordinate camera with mouse drag and scroll-wheel zoom.
+
 import { mat4, vec3 } from "gl-matrix";
 
 export class OrbitCamera {
