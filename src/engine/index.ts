@@ -8,3 +8,4 @@ export { WebGL2Renderer } from "./WebGL2Renderer";
 export { WebGPURenderer } from "./WebGPURenderer";
 export { Transform } from "./Transform";
 export type { Material } from "./Material";
+export { Entity } from "./Entity";

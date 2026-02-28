@@ -30,10 +30,9 @@
 //
 // Both WebGL2 and WebGPU backends implement the full pipeline.
 
-import { mat4, vec3 } from "gl-matrix";
-import type { Renderer, MeshHandle, TextureHandle, DrawCall, RenderOptions } from "./engine";
-import { WebGPURenderer } from "./engine";
-import { WebGL2Renderer } from "./engine";
+import { mat4, vec3, quat } from "gl-matrix";
+import type { Renderer, MeshHandle, TextureHandle, DrawCall, RenderOptions, Material } from "./engine";
+import { WebGPURenderer, WebGL2Renderer, Entity } from "./engine";
 import { parseObj } from "./objParser";
 import { computeTangents } from "./tangents";
 
@@ -235,18 +234,26 @@ async function main() {
   const groundData = makeGroundPlane(3.0);
   const groundMesh: MeshHandle = renderer.createMesh(groundData, VERTEX_LAYOUT);
 
-  // Create textures
+  // Create textures & material
   const texture: TextureHandle = renderer.createTexture({
     width: TEX_SIZE, height: TEX_SIZE, data: TEX_PIXELS,
   });
   const normalMap: TextureHandle = renderer.createTexture({
     width: TEX_SIZE, height: TEX_SIZE, data: NORMAL_MAP,
   });
+  const checkerMaterial: Material = { texture, normalMap };
 
-  // Model matrices
-  const torusModel = mat4.create();
-  const groundModel = mat4.create(); // identity — ground stays put
+  // Entities
+  const torus = new Entity(torusMesh, checkerMaterial);
+  torus.onUpdate = (time) => {
+    const angle = time * 0.001;
+    quat.identity(torus.transform.rotation);
+    quat.rotateY(torus.transform.rotation, torus.transform.rotation, angle);
+    quat.rotateX(torus.transform.rotation, torus.transform.rotation, angle * 0.7);
+  };
+  const ground = new Entity(groundMesh, checkerMaterial);
 
+  // Camera & light matrices (still manual — extracted in later commits)
   const view = mat4.create();
   const proj = mat4.create();
   const viewProj = mat4.create();
@@ -258,11 +265,9 @@ async function main() {
   function frame(time: DOMHighResTimeStamp) {
     renderer.resize();
 
-    // Animate torus
-    const angle = time * 0.001;
-    mat4.identity(torusModel);
-    mat4.rotateY(torusModel, torusModel, angle);
-    mat4.rotateX(torusModel, torusModel, angle * 0.7);
+    // Update entities
+    torus.update(time);
+    ground.update(time);
 
     // Camera
     const eye = cameraPosition();
@@ -277,11 +282,8 @@ async function main() {
     mat4.ortho(lightProj, -4, 4, -4, 4, 0.1, 12.0);
     mat4.multiply(lightViewProj, lightProj, lightView);
 
-    // Build draw calls
-    const drawCalls: DrawCall[] = [
-      { mesh: torusMesh, texture, normalMap, model: torusModel },
-      { mesh: groundMesh, texture, normalMap, model: groundModel },
-    ];
+    // Build draw calls from entities
+    const drawCalls: DrawCall[] = [torus.drawCall(), ground.drawCall()];
 
     const options: RenderOptions = {
       shadows: shadowsToggle.checked,
