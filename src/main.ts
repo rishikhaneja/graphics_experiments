@@ -57,7 +57,7 @@ const shadowsToggle = document.getElementById("toggle-shadows") as HTMLInputElem
 const normalsToggle = document.getElementById("toggle-normals") as HTMLInputElement;
 const postprocToggle = document.getElementById("toggle-postproc") as HTMLInputElement;
 
-async function createRenderer(): Promise<Renderer & { aspect: number }> {
+async function createRenderer(): Promise<Renderer> {
   if (backendParam !== "webgl2" && navigator.gpu) {
     try {
       const r = await WebGPURenderer.create(canvas);

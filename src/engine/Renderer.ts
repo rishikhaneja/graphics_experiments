@@ -34,6 +34,7 @@ export interface RenderOptions {
 }
 
 export interface Renderer {
+  readonly aspect: number;
   createMesh(data: Float32Array, layout: VertexLayout[]): MeshHandle;
   createTexture(desc: TextureDesc): TextureHandle;
   resize(): void;

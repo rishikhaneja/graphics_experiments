@@ -2,12 +2,12 @@ import type { Renderer, RenderOptions } from "./Renderer";
 import type { Scene } from "./Scene";
 
 export class Engine {
-  renderer: Renderer & { aspect: number };
+  renderer: Renderer;
   scene: Scene;
   options: RenderOptions;
   private _rafId = 0;
 
-  constructor(renderer: Renderer & { aspect: number }, scene: Scene, options: RenderOptions) {
+  constructor(renderer: Renderer, scene: Scene, options: RenderOptions) {
     this.renderer = renderer;
     this.scene = scene;
     this.options = options;
