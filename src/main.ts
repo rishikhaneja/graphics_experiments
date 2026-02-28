@@ -32,7 +32,7 @@
 
 import { mat4, vec3, quat } from "gl-matrix";
 import type { Renderer, MeshHandle, TextureHandle, DrawCall, RenderOptions, Material } from "./engine";
-import { WebGPURenderer, WebGL2Renderer, Entity } from "./engine";
+import { WebGPURenderer, WebGL2Renderer, Entity, OrbitCamera } from "./engine";
 import { parseObj } from "./objParser";
 import { computeTangents } from "./tangents";
 
@@ -167,55 +167,8 @@ const NORMAL_MAP = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
 // Orbit camera
 // ---------------------------------------------------------------------------
 
-let camTheta = 0.5;
-let camPhi = 1.0;
-let camRadius = 4.0;
-
-const CAM_PHI_MIN = 0.1;
-const CAM_PHI_MAX = Math.PI - 0.1;
-const CAM_RADIUS_MIN = 1.0;
-const CAM_RADIUS_MAX = 20.0;
-
-function cameraPosition(): vec3 {
-  return vec3.fromValues(
-    camRadius * Math.sin(camPhi) * Math.sin(camTheta),
-    camRadius * Math.cos(camPhi),
-    camRadius * Math.sin(camPhi) * Math.cos(camTheta)
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Mouse controls
-// ---------------------------------------------------------------------------
-
-let isDragging = false;
-let lastMouseX = 0;
-let lastMouseY = 0;
-
-canvas.addEventListener("mousedown", (e) => {
-  if (e.button === 0) {
-    isDragging = true;
-    lastMouseX = e.clientX;
-    lastMouseY = e.clientY;
-  }
-});
-
-window.addEventListener("mouseup", () => { isDragging = false; });
-
-window.addEventListener("mousemove", (e) => {
-  if (!isDragging) return;
-  const dx = e.clientX - lastMouseX;
-  const dy = e.clientY - lastMouseY;
-  lastMouseX = e.clientX;
-  lastMouseY = e.clientY;
-  camTheta -= dx * 0.01;
-  camPhi = Math.max(CAM_PHI_MIN, Math.min(CAM_PHI_MAX, camPhi + dy * 0.01));
-});
-
-canvas.addEventListener("wheel", (e) => {
-  e.preventDefault();
-  camRadius = Math.max(CAM_RADIUS_MIN, Math.min(CAM_RADIUS_MAX, camRadius + e.deltaY * 0.01));
-}, { passive: false });
+const camera = new OrbitCamera();
+camera.attach(canvas);
 
 // ---------------------------------------------------------------------------
 // Main
@@ -253,9 +206,7 @@ async function main() {
   };
   const ground = new Entity(groundMesh, checkerMaterial);
 
-  // Camera & light matrices (still manual — extracted in later commits)
-  const view = mat4.create();
-  const proj = mat4.create();
+  // Light matrices (still manual — extracted in next commit)
   const viewProj = mat4.create();
   const lightPos = vec3.create();
   const lightView = mat4.create();
@@ -270,10 +221,8 @@ async function main() {
     ground.update(time);
 
     // Camera
-    const eye = cameraPosition();
-    mat4.lookAt(view, eye, [0, 0, 0], [0, 1, 0]);
-    mat4.perspective(proj, Math.PI / 4, renderer.aspect, 0.1, 100.0);
-    mat4.multiply(viewProj, proj, view);
+    camera.viewProjection(viewProj, renderer.aspect);
+    const eye = camera.position();
 
     // Light
     const lightAngle = time * 0.0005;
