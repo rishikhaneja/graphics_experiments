@@ -1,4 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 480" font-family="Segoe UI, Arial, sans-serif">
+  <rect width="720" height="480" fill="white"/>
   <!-- Title -->
   <text x="360" y="28" text-anchor="middle" font-size="16" font-weight="bold" fill="#333">Engine Layer</text>
 
@@ -34,13 +35,11 @@
 
   <!-- MeshHandle -->
   <rect x="215" y="235" width="60" height="60" rx="5" fill="#fff2cc" stroke="#d6b656" stroke-width="1"/>
-  <text x="245" y="260" text-anchor="middle" font-size="9" font-weight="bold" fill="#8a7030">Mesh</text>
-  <text x="245" y="272" text-anchor="middle" font-size="9" font-weight="bold" fill="#8a7030">Handle</text>
+  <text x="245" y="263" text-anchor="middle" font-size="8" font-weight="bold" fill="#8a7030">MeshHandle</text>
 
   <!-- Material -->
-  <rect x="285" y="235" width="52" height="60" rx="5" fill="#fff2cc" stroke="#d6b656" stroke-width="1"/>
-  <text x="311" y="260" text-anchor="middle" font-size="9" font-weight="bold" fill="#8a7030">Mate-</text>
-  <text x="311" y="272" text-anchor="middle" font-size="9" font-weight="bold" fill="#8a7030">rial</text>
+  <rect x="285" y="235" width="60" height="60" rx="5" fill="#fff2cc" stroke="#d6b656" stroke-width="1"/>
+  <text x="315" y="263" text-anchor="middle" font-size="8" font-weight="bold" fill="#8a7030">Material</text>
 
   <!-- OrbitCamera -->
   <rect x="380" y="200" width="120" height="55" rx="6" fill="#c8daf0" stroke="#6c8ebf" stroke-width="1"/>
