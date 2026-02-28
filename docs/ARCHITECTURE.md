@@ -59,6 +59,8 @@ Above the `Renderer` sits the engine layer (added in Step 14). These modules han
 
 `main.ts` creates the renderer, loads assets, builds entities/scene, and calls `engine.start()`.
 
+![Engine Layer](engine-layer.svg)
+
 ## Rendering Pipeline
 
 Both backends implement an identical 6-pass deferred pipeline:
@@ -116,6 +118,8 @@ Interleaved, 11 floats per vertex (44 bytes stride):
 ## Runtime Loop
 
 `Engine.start()` drives the frame loop via `requestAnimationFrame`:
+
+![Runtime Loop](runtime-loop.svg)
 
 1. **Resize** — `renderer.resize()` syncs canvas to display size
 2. **Update** — `scene.update(time)` calls each entity's `onUpdate` callback (torus rotation, light orbit)
