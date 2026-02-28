@@ -17,6 +17,12 @@ A from-scratch learning project for 3D graphics, game engine design, and shaders
 - **Math:** gl-matrix (vectors, matrices, transforms)
 - **Runtime dependencies:** gl-matrix only. Everything else we build ourselves.
 
+## Documentation
+
+- `docs/ARCHITECTURE.md` — how the engine works (file map, pipeline, interfaces)
+- `docs/CONCEPTS.md` — plain-English explanations of graphics concepts. No math, just "what is this and why does it exist?". When applicable, link to where the concept appears in the codebase (file + symbol). Add a new `##` section whenever a new concept comes up.
+- Diagrams use draw.io: keep a `.drawio` source file in `docs/` and export an `.svg` alongside it. Embed the SVG in markdown via `![label](filename.svg)` so it renders on GitHub.
+
 ## Conventions
 
 - Shaders are written as inline strings or in `src/shaders/` — no build-time shader magic.
@@ -27,10 +33,10 @@ A from-scratch learning project for 3D graphics, game engine design, and shaders
 
 ## After Every Change
 
-1. `npx tsc` — verify no type errors
-2. `node test/console.mjs` — launch headless browser against the running dev server (port 5199) and check for console errors
-3. Update the roadmap
-4. **Report any debt.** If you had to cut corners, report it and ask for recommendations.
+1. `npx tsc` — check for type errors
+2. `node test/console.mjs` — check for console errors (requires dev server on port 5199)
+3. Update the roadmap in `src/main.ts`
+4. Report any debt and ask for recommendations
 
 ## Deployment
 
