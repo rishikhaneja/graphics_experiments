@@ -46,6 +46,7 @@ struct GBufUniforms {
   model: mat4x4f,
   viewProj: mat4x4f,
   hasNormalMap: f32,
+  emissive: f32,
 }
 @group(0) @binding(0) var<uniform> u: GBufUniforms;
 @group(0) @binding(1) var texSampler: sampler;
@@ -105,7 +106,8 @@ fn fs(in: VertexOut) -> GBufOut {
   } else {
     N = normalize(in.N);
   }
-  out.normal = vec4f(N, 1.0);
+  // .w == 1.0 signals emissive — lighting pass bypasses Blinn-Phong for this pixel
+  out.normal = vec4f(N, u.emissive);
   out.albedo = textureSample(albedoTex, texSampler, in.texCoord);
   return out;
 }
@@ -177,7 +179,8 @@ fn shadowCalc(worldPos: vec3f) -> f32 {
 fn fs(in: VertexOut) -> @location(0) vec4f {
   let gPos = textureSample(gPosition, gSampler, in.uv);
   let worldPos = gPos.rgb;
-  let N = normalize(textureSample(gNormal, gSampler, in.uv).rgb);
+  let gNorm = textureSample(gNormal, gSampler, in.uv);
+  let N = normalize(gNorm.rgb);
   let albedo = textureSample(gAlbedo, gSampler, in.uv).rgb;
 
   let L = normalize(u.lightPos - worldPos);
@@ -188,14 +191,18 @@ fn fs(in: VertexOut) -> @location(0) vec4f {
   let diffuse = max(dot(N, L), 0.0);
   let specular = pow(max(dot(R, V), 0.0), 32.0) * 2.0;
 
+  // shadowCalc must remain in uniform control flow (no early returns above)
   let shadow = shadowCalc(worldPos);
 
   let lit = albedo * ambient
           + albedo * diffuse * shadow
           + vec3f(1.0) * specular * shadow;
 
-  // Background pixels (alpha == 0) get a flat color; others get lighting
-  let color = select(lit, vec3f(0.08, 0.08, 0.12), gPos.a == 0.0);
+  // Emissive: skip lighting, output bright HDR albedo (feeds bloom)
+  let afterEmissive = select(lit, albedo * 5.0, gNorm.w > 0.5);
+
+  // Background pixels (alpha == 0) get a flat colour
+  let color = select(afterEmissive, vec3f(0.0, 0.0, 0.0), gPos.a == 0.0);
 
   return vec4f(color, 1.0);
 }
@@ -719,6 +726,7 @@ export class WebGPURenderer implements Renderer {
 
         for (let i = 0; i < drawCalls.length; i++) {
           const dc = drawCalls[i];
+          if (dc.emissive) continue; // light sources don't cast shadows
           const mesh = dc.mesh as GPUMeshHandle;
 
           const buf = new ArrayBuffer(128);
@@ -769,6 +777,7 @@ export class WebGPURenderer implements Renderer {
         f32.set(dc.model as unknown as Float32Array, 0);
         f32.set(u.viewProj as unknown as Float32Array, 16);
         f32[32] = hasNormal ? 1.0 : 0.0;
+        f32[33] = dc.emissive ? 1.0 : 0.0;
         device.queue.writeBuffer(this.gBufUniformBuffers[i], 0, buf);
 
         const bindGroup = device.createBindGroup({

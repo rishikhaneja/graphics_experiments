@@ -29,6 +29,7 @@ export class Entity {
       texture: this.material.texture,
       normalMap: this.material.normalMap,
       model: this._modelMatrix,
+      emissive: this.material.emissive,
     };
   }
 }

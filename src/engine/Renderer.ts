@@ -18,6 +18,8 @@ export interface DrawCall {
   texture: TextureHandle;
   normalMap?: TextureHandle;
   model: mat4;
+  /** Skips lighting — outputs albedo at HDR brightness (feeds bloom). */
+  emissive?: boolean;
 }
 
 export interface FrameUniforms {

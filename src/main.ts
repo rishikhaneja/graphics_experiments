@@ -119,6 +119,40 @@ function makeGroundPlane(size: number): Float32Array {
 }
 
 // ---------------------------------------------------------------------------
+// Sphere geometry (UV sphere with tangents)
+// ---------------------------------------------------------------------------
+
+function makeSphere(radius: number, stacks: number, slices: number): Float32Array {
+  // Interleaved: pos(3) + uv(2) + normal(3) + tangent(3) = 11 floats per vertex
+  const verts: number[] = [];
+
+  function pushVertex(stack: number, slice: number) {
+    const theta = (stack / stacks) * Math.PI;       // 0 (north) → π (south)
+    const phi   = (slice / slices) * 2 * Math.PI;   // 0 → 2π around equator
+    const sinT = Math.sin(theta), cosT = Math.cos(theta);
+    const sinP = Math.sin(phi),   cosP = Math.cos(phi);
+    // pos
+    verts.push(radius * sinT * cosP, radius * cosT, radius * sinT * sinP);
+    // uv
+    verts.push(slice / slices, stack / stacks);
+    // normal = normalised pos (outward on a unit sphere)
+    verts.push(sinT * cosP, cosT, sinT * sinP);
+    // tangent = longitude direction (-sinPhi, 0, cosPhi)
+    verts.push(-sinP, 0, cosP);
+  }
+
+  for (let i = 0; i < stacks; i++) {
+    for (let j = 0; j < slices; j++) {
+      // CCW winding → outward-facing normals (verified by cross product)
+      pushVertex(i,     j);      pushVertex(i + 1, j + 1);  pushVertex(i + 1, j);
+      pushVertex(i,     j);      pushVertex(i,     j + 1);  pushVertex(i + 1, j + 1);
+    }
+  }
+
+  return new Float32Array(verts);
+}
+
+// ---------------------------------------------------------------------------
 // Procedural textures
 // ---------------------------------------------------------------------------
 
@@ -196,6 +230,11 @@ async function main() {
   });
   const checkerMaterial: Material = { texture, normalMap };
 
+  // Solid white texture for the light sphere (reads as emissive/unlit-looking)
+  const whiteTex: TextureHandle = renderer.createTexture({
+    width: 1, height: 1, data: new Uint8Array([255, 255, 255, 255]),
+  });
+
   // Entities
   const torus = new Entity(torusMesh, checkerMaterial);
   torus.onUpdate = (time) => {
@@ -213,10 +252,18 @@ async function main() {
     vec3.set(light.position, 3.0 * Math.cos(a), 3.0, 3.0 * Math.sin(a));
   };
 
+  // Light sphere — small white sphere that tracks the light position
+  const lightSphereMesh: MeshHandle = renderer.createMesh(makeSphere(0.15, 12, 16), VERTEX_LAYOUT);
+  const lightSphere = new Entity(lightSphereMesh, { texture: whiteTex, emissive: true });
+  lightSphere.onUpdate = () => {
+    vec3.copy(lightSphere.transform.position, light.position);
+  };
+
   // Scene
   const scene = new Scene(camera, light);
   scene.add(torus);
   scene.add(ground);
+  scene.add(lightSphere);
 
   // Engine
   const options: RenderOptions = {

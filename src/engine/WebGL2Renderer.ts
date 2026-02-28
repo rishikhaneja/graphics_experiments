@@ -102,6 +102,7 @@ in mat3 vTBN;
 uniform sampler2D uTexture;
 uniform sampler2D uNormalMap;
 uniform bool uHasNormalMap;
+uniform bool uEmissive;
 
 layout(location = 0) out vec4 gPosition;
 layout(location = 1) out vec4 gNormal;
@@ -117,7 +118,8 @@ void main() {
   } else {
     N = normalize(vTBN[2]);
   }
-  gNormal = vec4(N, 1.0);
+  // .a == 1.0 signals emissive — lighting pass bypasses Blinn-Phong for this pixel
+  gNormal = vec4(N, uEmissive ? 1.0 : 0.0);
 
   gAlbedo = texture(uTexture, vTexCoord);
 }
@@ -181,12 +183,20 @@ float shadowCalc(vec3 worldPos) {
 }
 
 void main() {
-  vec3 worldPos = texture(uGPosition, vUV).rgb;
-  vec3 N = normalize(texture(uGNormal, vUV).rgb);
+  vec4 gPosA = texture(uGPosition, vUV);
+  if (gPosA.a == 0.0) {
+    fragColor = vec4(0.0, 0.0, 0.0, 1.0);
+    return;
+  }
+
+  vec3 worldPos = gPosA.rgb;
+  vec4 gNormA = texture(uGNormal, vUV);
+  vec3 N = normalize(gNormA.rgb);
   vec3 albedo = texture(uGAlbedo, vUV).rgb;
 
-  if (texture(uGPosition, vUV).a == 0.0) {
-    fragColor = vec4(0.08, 0.08, 0.12, 1.0);
+  // Emissive: skip lighting, output bright HDR albedo (feeds bloom)
+  if (gNormA.a > 0.5) {
+    fragColor = vec4(albedo * 5.0, 1.0);
     return;
   }
 
@@ -315,6 +325,7 @@ export class WebGL2Renderer implements Renderer {
   private gBufUTexture: WebGLUniformLocation | null;
   private gBufUNormalMap: WebGLUniformLocation | null;
   private gBufUHasNormalMap: WebGLUniformLocation | null;
+  private gBufUEmissive: WebGLUniformLocation | null;
 
   // G-Buffer FBO + textures
   private gBufFBO: WebGLFramebuffer;
@@ -387,6 +398,7 @@ export class WebGL2Renderer implements Renderer {
     this.gBufUTexture = gl.getUniformLocation(this.gBufProgram, "uTexture");
     this.gBufUNormalMap = gl.getUniformLocation(this.gBufProgram, "uNormalMap");
     this.gBufUHasNormalMap = gl.getUniformLocation(this.gBufProgram, "uHasNormalMap");
+    this.gBufUEmissive = gl.getUniformLocation(this.gBufProgram, "uEmissive");
 
     this.gBufFBO = gl.createFramebuffer()!;
     this.gPositionTex = gl.createTexture()!;
@@ -579,6 +591,7 @@ export class WebGL2Renderer implements Renderer {
       gl.enable(gl.CULL_FACE);
       gl.cullFace(gl.FRONT);
       for (const dc of drawCalls) {
+        if (dc.emissive) continue; // light sources don't cast shadows
         const mesh = dc.mesh as GL2MeshHandle;
         gl.uniformMatrix4fv(this.uShadowModel, false, dc.model);
         gl.bindVertexArray(mesh.vao);
@@ -612,6 +625,7 @@ export class WebGL2Renderer implements Renderer {
       gl.bindTexture(gl.TEXTURE_2D, hasNormal ? (dc.normalMap as GL2TextureHandle).texture : this.flatNormalTex);
       gl.uniform1i(this.gBufUNormalMap, 1);
       gl.uniform1i(this.gBufUHasNormalMap, hasNormal ? 1 : 0);
+      gl.uniform1i(this.gBufUEmissive, dc.emissive ? 1 : 0);
 
       gl.bindVertexArray(mesh.vao);
       gl.drawArrays(gl.TRIANGLES, 0, mesh.vertexCount);
