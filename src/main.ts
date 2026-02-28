@@ -32,7 +32,7 @@
 
 import { mat4, vec3, quat } from "gl-matrix";
 import type { Renderer, MeshHandle, TextureHandle, DrawCall, RenderOptions, Material } from "./engine";
-import { WebGPURenderer, WebGL2Renderer, Entity, OrbitCamera } from "./engine";
+import { WebGPURenderer, WebGL2Renderer, Entity, OrbitCamera, Light } from "./engine";
 import { parseObj } from "./objParser";
 import { computeTangents } from "./tangents";
 
@@ -206,11 +206,13 @@ async function main() {
   };
   const ground = new Entity(groundMesh, checkerMaterial);
 
-  // Light matrices (still manual — extracted in next commit)
+  // Camera & light
   const viewProj = mat4.create();
-  const lightPos = vec3.create();
-  const lightView = mat4.create();
-  const lightProj = mat4.create();
+  const light = new Light();
+  light.onUpdate = (time) => {
+    const a = time * 0.0005;
+    vec3.set(light.position, 3.0 * Math.cos(a), 3.0, 3.0 * Math.sin(a));
+  };
   const lightViewProj = mat4.create();
 
   function frame(time: DOMHighResTimeStamp) {
@@ -225,11 +227,8 @@ async function main() {
     const eye = camera.position();
 
     // Light
-    const lightAngle = time * 0.0005;
-    vec3.set(lightPos, 3.0 * Math.cos(lightAngle), 3.0, 3.0 * Math.sin(lightAngle));
-    mat4.lookAt(lightView, lightPos, [0, 0, 0], [0, 1, 0]);
-    mat4.ortho(lightProj, -4, 4, -4, 4, 0.1, 12.0);
-    mat4.multiply(lightViewProj, lightProj, lightView);
+    light.update(time);
+    light.viewProjection(lightViewProj);
 
     // Build draw calls from entities
     const drawCalls: DrawCall[] = [torus.drawCall(), ground.drawCall()];
@@ -242,7 +241,7 @@ async function main() {
 
     renderer.renderFrame(drawCalls, {
       viewProj,
-      lightPos,
+      lightPos: light.position,
       cameraPos: eye,
       lightViewProj,
     }, options);
